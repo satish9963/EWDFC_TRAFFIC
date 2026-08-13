@@ -51,14 +51,14 @@ def render_sidebar():
                 data=_blank_template(OD_COLUMNS),
                 file_name="EWDFC_OD_template.xlsx",
                 mime=XLSX_MIME,
-                use_container_width=True,
+                width="stretch",
             )
             st.download_button(
                 "Blank DFC station template",
                 data=_blank_template(DFC_STATION_COLUMNS),
                 file_name="EWDFC_DFC_stations_template.xlsx",
                 mime=XLSX_MIME,
-                use_container_width=True,
+                width="stretch",
             )
 
     return threshold, od_file, dfc_file
@@ -74,5 +74,5 @@ def render_export(excel_data, threshold):
             data=excel_data,
             file_name=f"EWDFC_Traffic_Report_T{threshold}.xlsx",
             mime=XLSX_MIME,
-            use_container_width=True,
+            width="stretch",
         )

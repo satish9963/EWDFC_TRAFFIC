@@ -97,7 +97,7 @@ def _station_chart(station_summary):
             text=alt.Text("total_tonnage:Q", format=",.0f"),
         )
     )
-    st.altair_chart(_style((bars + labels).properties(height=340)), use_container_width=True)
+    st.altair_chart(_style((bars + labels).properties(height=340)), width="stretch")
 
 
 def _commodity_chart(master):
@@ -123,7 +123,7 @@ def _commodity_chart(master):
         )
         .properties(height=320)
     )
-    st.altair_chart(_style(chart), use_container_width=True)
+    st.altair_chart(_style(chart), width="stretch")
 
 
 def _threshold_chart(results):
@@ -150,7 +150,7 @@ def _threshold_chart(results):
     labels = bars.mark_text(dy=-8, color=INK_SECONDARY, fontSize=11).encode(
         text=alt.Text("Tonnage:Q", format=",.0f")
     )
-    st.altair_chart(_style((bars + labels).properties(height=300)), use_container_width=True)
+    st.altair_chart(_style((bars + labels).properties(height=300)), width="stretch")
 
 
 def render(results, threshold):
@@ -189,4 +189,4 @@ def render(results, threshold):
             if frame is None or frame.empty:
                 st.info("Nothing to show here.")
             else:
-                st.dataframe(display_columns(frame), use_container_width=True, hide_index=True)
+                st.dataframe(display_columns(frame), width="stretch", hide_index=True)
