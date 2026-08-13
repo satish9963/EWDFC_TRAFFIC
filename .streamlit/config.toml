@@ -1,0 +1,14 @@
+# Surface colours match the palette the charts were validated against.
+# Changing backgroundColor invalidates that contrast check — re-validate if you do.
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+backgroundColor = "#fcfcfb"
+secondaryBackgroundColor = "#f0efec"
+textColor = "#0b0b0b"
+
+[server]
+maxUploadSize = 300
+
+[browser]
+gatherUsageStats = false

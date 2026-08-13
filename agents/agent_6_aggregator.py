@@ -24,7 +24,9 @@ class TrafficAggregator:
             
             entry = row.get('Entry DFC')
             exit = row.get('Exit DFC')
-            touched = row.get('dfc_stations_touched', [])
+            # Must match the column the orchestrator writes, or through traffic
+            # silently falls back to empty and every through_* total stays zero.
+            touched = row.get('DFC stations touched', [])
             
             if isinstance(touched, str):
                 if touched.strip() == "":

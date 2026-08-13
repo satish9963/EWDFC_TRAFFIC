@@ -12,6 +12,9 @@
 !cache.db
 !core/
 !agents/
+!ui/
+!tests/
+!.streamlit/
 
 # ...but never the compiled artefacts inside those packages
 __pycache__/
