@@ -33,6 +33,7 @@ distance parsing, and - most importantly - errors you can SEE.
 """
 
 import concurrent.futures
+import os
 import random
 import re
 import threading
@@ -67,6 +68,11 @@ USER_AGENT = (
 MAX_WORKERS = 6
 MIN_INTERVAL = 0.30      # global spacing between requests, seconds
 MAX_RETRIES = 3
+
+# After this many consecutive connection-level failures we stop trying. A
+# refused TCP handshake will not heal within a run: 72 pairs x 3 retries x
+# exponential backoff is ~7 minutes of waiting for an answer that never comes.
+CIRCUIT_BREAK_AFTER = 5
 
 # Junction rule: the 38k cached rows were built with `"JN" in code`. Nothing
 # downstream consumes `junctions` (grep: only stored and passed through), so we
@@ -122,7 +128,10 @@ class RBSScraper:
         self.strict = strict
         self._local = threading.local()
         self._limiter = RateLimiter(MIN_INTERVAL)
-        self.stats = {"cache_hits": 0, "fetched": 0, "no_route": 0, "errors": 0}
+        self.stats = {"cache_hits": 0, "fetched": 0, "no_route": 0,
+                      "errors": 0, "skipped_circuit_open": 0}
+        self._consecutive_conn_errors = 0
+        self.circuit_open = False
         # (src, dest) -> CACHE | FETCHED | NO_ROUTE | ERROR
         self.pair_status = {}
         self._stats_lock = threading.Lock()
@@ -135,6 +144,13 @@ class RBSScraper:
         if s is None:
             s = requests.Session()
             s.verify = False              # CRIS chain is frequently incomplete
+            # A dead proxy in the environment produces exactly the Errno 111
+            # you saw. Set RBS_NO_PROXY=1 to bypass it for this host only.
+            if os.environ.get("RBS_NO_PROXY"):
+                s.trust_env = False
+            elif os.environ.get("RBS_PROXY"):
+                s.proxies = {"http": os.environ["RBS_PROXY"],
+                             "https": os.environ["RBS_PROXY"]}
             s.headers.update({
                 "User-Agent": USER_AGENT,
                 "Referer": RBS_FORM_PAGE,
@@ -156,6 +172,10 @@ class RBSScraper:
         payload[SRC_FIELD] = source
         payload[DEST_FIELD] = destination
 
+        if self.circuit_open:
+            self._bump("skipped_circuit_open")
+            raise RBSError("circuit open: RBS refused repeated connections")
+
         last = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -164,7 +184,17 @@ class RBSScraper:
                 if r.status_code in (429, 500, 502, 503, 504):
                     raise RBSError(f"HTTP {r.status_code} from RBS")
                 r.raise_for_status()
+                with self._stats_lock:
+                    self._consecutive_conn_errors = 0
                 return r.text
+            except requests.exceptions.ConnectionError as e:
+                # No TCP handshake. Backing off will not help; break out early.
+                last = e
+                with self._stats_lock:
+                    self._consecutive_conn_errors += 1
+                    if self._consecutive_conn_errors >= CIRCUIT_BREAK_AFTER:
+                        self.circuit_open = True
+                break
             except Exception as e:
                 last = e
                 if attempt < MAX_RETRIES - 1:
