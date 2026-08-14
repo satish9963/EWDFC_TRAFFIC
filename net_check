@@ -1,0 +1,144 @@
+"""
+Errno 111 triage.
+
+"Connection refused" means the TCP handshake was REFUSED, not that it timed
+out and not that DNS failed. DNS clearly worked (a name failure raises
+socket.gaierror / Errno -2). So something answered and said no.
+
+Only four things do that:
+
+  A. Your egress is filtered   - office/VPN/cloud firewall, or a proxy you are
+                                 not routing through. Control hosts also fail.
+  B. RBS blocks your source IP - very common for IR/CRIS sites from datacentre
+                                 ranges (Hugging Face, AWS, GCP) and non-IN IPs.
+                                 Control hosts succeed, RBS refuses.
+  C. RBS is down               - refuses from everywhere including your phone.
+  D. Wrong port/scheme locally - proxy env vars point somewhere dead.
+
+Run this on the SAME machine that produced the error.
+
+    python net_check.py
+"""
+
+import os
+import socket
+import ssl
+import sys
+import time
+from urllib.parse import urlparse
+
+HOST = "rbs.indianrail.gov.in"
+CONTROLS = ["www.indianrail.gov.in", "www.google.com"]
+PROXY_VARS = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
+
+
+def resolve(host):
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        return sorted({i[4][0] for i in infos})
+    except socket.gaierror as e:
+        return f"DNS FAILED: {e}"
+
+
+def tcp(host, port, timeout=8):
+    t0 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return f"OPEN ({1000 * (time.time() - t0):.0f} ms)"
+    except socket.timeout:
+        return "TIMEOUT (filtered/dropped - firewall silently discarding)"
+    except ConnectionRefusedError:
+        return "REFUSED (Errno 111 - something actively said no)"
+    except OSError as e:
+        return f"ERROR {type(e).__name__}: {e}"
+
+
+def tls(host, timeout=8):
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, 443), timeout=timeout) as s:
+            with ctx.wrap_socket(s, server_hostname=host) as ss:
+                return f"OK  {ss.version()}"
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+def http_probe(host):
+    """TCP open is not proof. An intercepting proxy accepts the connection and
+    then answers for the origin - which looks 'OPEN' but is not RBS."""
+    try:
+        import requests, urllib3
+        urllib3.disable_warnings()
+        r = requests.get(f"https://{host}/ShortPath/ShortPath.jsp",
+                         verify=False, timeout=15)
+        note = ""
+        if "x-deny-reason" in {k.lower() for k in r.headers}:
+            note = "  <-- INTERCEPTING PROXY, not RBS"
+        elif r.status_code in (403, 407) and len(r.text) < 600:
+            note = "  <-- short body, likely a filter page not RBS"
+        return f"HTTP {r.status_code}, {len(r.text)} bytes{note}"
+    except Exception as e:
+        return f"{type(e).__name__}: {e}"
+
+
+def main():
+    print("=== proxy environment ===")
+    seen = {v: os.environ.get(v) for v in PROXY_VARS if os.environ.get(v)}
+    if seen:
+        for k, v in seen.items():
+            print(f"  {k} = {v}")
+        print("  NOTE: requests honours these. If a proxy is set but dead, you")
+        print("        get exactly this error. Try again with them unset.")
+        for v in PROXY_VARS:
+            os.environ.pop(v, None)
+        print("  (cleared for the rest of this run)")
+    else:
+        print("  none set - requests is connecting directly")
+
+    print(f"\n=== {HOST} ===")
+    print(f"  DNS      : {resolve(HOST)}")
+    print(f"  TCP :443 : {tcp(HOST, 443)}")
+    print(f"  TCP :80  : {tcp(HOST, 80)}")
+    print(f"  TLS      : {tls(HOST)}")
+    http = http_probe(HOST)
+    print(f"  HTTP     : {http}")
+
+    print("\n=== control hosts ===")
+    results = {}
+    for c in CONTROLS:
+        results[c] = tcp(c, 443)
+        print(f"  {c:<26} {results[c]}")
+
+    print("\n=== verdict ===")
+    intercepted = "INTERCEPTING PROXY" in http or "likely a filter page" in http
+    rbs_ok = tcp(HOST, 443).startswith("OPEN") and http.startswith("HTTP 200")
+
+    if intercepted:
+        print("  A proxy is answering for RBS - the TCP check above is a false")
+        print("  positive. Whitelist rbs.indianrail.gov.in in your egress rules.")
+        return
+    controls_ok = any(r.startswith("OPEN") for r in results.values())
+
+    if rbs_ok:
+        print("  RBS is reachable NOW. The earlier failure was transient - most")
+        print("  likely rate limiting from parallel workers. Lower MAX_WORKERS")
+        print("  to 2 and raise MIN_INTERVAL to 1.0 in agent_2_rbs_scraper.py.")
+    elif not controls_ok:
+        print("  Case A: nothing outbound works. This is YOUR network/firewall,")
+        print("  not RBS. Check VPN, corporate proxy, or container egress rules.")
+    else:
+        print("  Case B: general internet works, RBS specifically refuses you.")
+        print("  Almost always a source-IP block. Check where you are running:")
+        print("    - Hugging Face Space / AWS / GCP  -> datacentre IP, expect a block")
+        print("    - VPN with a non-India exit       -> disconnect and retry")
+        print("    - Office network                  -> gov sites often blocked")
+        print("  Verify from a phone on mobile data. If it loads there, it is")
+        print("  your source IP, and no code change will fix it - you need to")
+        print("  run the fetch from an Indian residential/office connection and")
+        print("  ship the resulting cache.db to the deployment.")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
