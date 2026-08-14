@@ -23,7 +23,17 @@ class QAAudit:
 
         for idx, row in final_df.iterrows():
             if pd.isna(row.get('IR Distance')) or row.get('IR Distance') == 0:
-                self.log_exception(idx, "Missing Route / Portal Failure", f"Source: {row.get('From Station Code')}, Dest: {row.get('To Station Code')}")
+                # A portal failure and a genuine no-route are different facts
+                # and need different follow-up: one is "retry", the other is
+                # "check the station codes".
+                source_state = row.get('Route Source', 'UNKNOWN')
+                if source_state == 'ERROR':
+                    issue = "RBS Portal Failure (retry)"
+                elif source_state == 'NO_ROUTE':
+                    issue = "No Route Returned by RBS"
+                else:
+                    issue = "Missing Route"
+                self.log_exception(idx, issue, f"Source: {row.get('From Station Code')}, Dest: {row.get('To Station Code')}")
             
             if row.get('Eligible') == 'YES' and row.get('Interaction Count', 0) < row.get('Threshold Applied', 2):
                 self.log_exception(idx, "Logic Error", f"Eligible with count {row.get('Interaction Count')} < threshold {row.get('Threshold Applied')}")
