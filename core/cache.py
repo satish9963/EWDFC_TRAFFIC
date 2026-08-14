@@ -14,6 +14,7 @@ class RBSCache:
         with self._lock:
             with sqlite3.connect(self.db_path, timeout=15) as conn:
                 cursor = conn.cursor()
+                cursor.execute('PRAGMA journal_mode=WAL')
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS rbs_routes (
                         source TEXT,
@@ -63,4 +64,40 @@ class RBSCache:
                     json.dumps(junctions), 
                     status
                 ))
+                conn.commit()
+
+    def status_counts(self):
+        """{'SUCCESS': n, 'FAILED': n, 'ERROR': n} - lets the UI report what the
+        cache actually holds instead of guessing."""
+        with self._lock:
+            with sqlite3.connect(self.db_path, timeout=15) as conn:
+                rows = conn.execute(
+                    'SELECT status, COUNT(*) FROM rbs_routes GROUP BY status'
+                ).fetchall()
+                return {r[0]: r[1] for r in rows}
+
+    def purge_status(self, status="ERROR"):
+        """Drop rows written by a failed run so the next run retries them cleanly.
+
+        ERROR rows are re-attempted anyway (get_route only short-circuits on
+        SUCCESS), but leaving them in makes status_counts() misleading.
+        """
+        with self._lock:
+            with sqlite3.connect(self.db_path, timeout=15) as conn:
+                cur = conn.execute(
+                    'DELETE FROM rbs_routes WHERE status = ?', (status,))
+                conn.commit()
+                return cur.rowcount
+
+    def invalidate(self, pairs):
+        """Force specific (source, destination) pairs to be refetched live.
+
+        Use this to prove the scraper is really hitting RBS: invalidate a few
+        pairs, re-run, and check stats['fetched'] > 0.
+        """
+        with self._lock:
+            with sqlite3.connect(self.db_path, timeout=15) as conn:
+                conn.executemany(
+                    'DELETE FROM rbs_routes WHERE source = ? AND destination = ?',
+                    [(str(s).strip().upper(), str(d).strip().upper()) for s, d in pairs])
                 conn.commit()
