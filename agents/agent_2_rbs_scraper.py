@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import concurrent.futures
 from core.cache import RBSCache
-from config import https://rbs.indianrail.gov.in/
+from config import RBS_URL
 
 import warnings
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
@@ -29,7 +29,7 @@ class RBSScraper:
         }
         
         try:
-            r = self.session.post(https://rbs.indianrail.gov.in/, data=data, timeout=30)
+            r = self.session.post(RBS_URL, data=data, timeout=30)
             soup = BeautifulSoup(r.text, 'html.parser')
             
             rows = soup.find_all('tr')
