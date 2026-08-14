@@ -86,6 +86,22 @@ if st.button("Run assessment pipeline", type="primary"):
 
 if st.session_state.results is not None:
     ran = st.session_state.ran_threshold
+
+    # Where did the routes come from? With ~38k pairs already cached, a normal
+    # run can make zero network calls - which reads as "it isn't fetching".
+    rs = st.session_state.results.get("route_stats") or {}
+    if rs:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Unique OD pairs", rs.get("unique_pairs", 0))
+        c2.metric("From cache", rs.get("cache_hits", 0))
+        c3.metric("Fetched from RBS", rs.get("fetched", 0))
+        c4.metric("Portal errors", rs.get("errors", 0))
+        if rs.get("errors"):
+            st.error(f"RBS portal unreachable for {rs['errors']} pair(s). "
+                     f"Last error: {rs.get('last_error')}")
+        elif rs.get("fetched", 0) == 0 and rs.get("cache_hits", 0):
+            st.info("Every OD pair was served from the bundled cache - no live "
+                    "RBS calls were needed this run.")
     if ran != threshold:
         st.warning(
             f"These results were produced at threshold T{ran}. "
