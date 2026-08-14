@@ -97,8 +97,12 @@ if st.session_state.results is not None:
         c3.metric("Fetched from RBS", rs.get("fetched", 0))
         c4.metric("Portal errors", rs.get("errors", 0))
         if rs.get("errors"):
-            st.error(f"RBS portal unreachable for {rs['errors']} pair(s). "
-                     f"Last error: {rs.get('last_error')}")
+            msg = f"RBS portal unreachable for {rs['errors']} pair(s)."
+            if "ConnectionError" in str(rs.get("last_error") or ""):
+                msg += (" The TCP connection was refused - this is a network or "
+                        "source-IP issue, not a data issue. Run `python net_check.py` "
+                        "on this machine to identify which.")
+            st.error(f"{msg}\n\nLast error: {rs.get('last_error')}")
         elif rs.get("fetched", 0) == 0 and rs.get("cache_hits", 0):
             st.info("Every OD pair was served from the bundled cache - no live "
                     "RBS calls were needed this run.")
