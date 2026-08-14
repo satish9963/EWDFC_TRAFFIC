@@ -2,7 +2,7 @@ import requests
 from bs4 import BeautifulSoup
 import concurrent.futures
 from core.cache import RBSCache
-from config import RBS_URL
+from config import https://rbs.indianrail.gov.in/
 
 import warnings
 warnings.filterwarnings('ignore', message='Unverified HTTPS request')
