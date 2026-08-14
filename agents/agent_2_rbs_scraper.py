@@ -29,7 +29,7 @@ class RBSScraper:
         }
         
         try:
-            r = self.session.post(RBS_URL, data=data, timeout=30)
+            r = self.session.post(https://rbs.indianrail.gov.in/, data=data, timeout=30)
             soup = BeautifulSoup(r.text, 'html.parser')
             
             rows = soup.find_all('tr')
