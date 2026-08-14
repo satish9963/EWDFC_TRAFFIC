@@ -1,0 +1,123 @@
+"""
+Why is IR Distance blank?
+
+IR Distance can only be empty for one of four reasons. This script tells you
+which one, for YOUR OD file, without running the whole pipeline:
+
+  1. The OD pair was never cached AND the RBS portal is unreachable  -> ERROR
+  2. The OD pair was reachable but RBS returned no route             -> NO_ROUTE
+  3. The station code is malformed, so it matches nothing            -> BAD CODE
+  4. Everything is cached and fine, and the blank is somewhere else  -> OK
+
+Usage:
+    python diagnose_run.py data/OD_Traffic.xlsx
+    python diagnose_run.py                    # connectivity check only
+"""
+
+import sys
+from collections import Counter
+
+import pandas as pd
+
+from agents.agent_1_validator import InputValidator
+from agents.agent_2_rbs_scraper import RBSScraper, norm_code
+from core.cache import RBSCache
+
+CODE_OK = lambda c: c.isalnum() and 2 <= len(c) <= 8 and c.isupper()
+
+
+def check_portal():
+    print("\n--- 1. Can this machine reach RBS? ---")
+    d = RBSScraper().diagnose("NGP", "BPL")
+    if "exception" in d:
+        print(f"  UNREACHABLE: {d['exception']}")
+        print("  -> Every uncached pair will come back blank. Fix the network,")
+        print("     proxy or firewall before looking at anything else.")
+        return False
+
+    if d["http_status"] != 200:
+        print(f"  HTTP {d['http_status']} - the portal did not serve the page.")
+        print(f"  body: {d['snippet'][:160]}")
+        print("  -> Blocked upstream (proxy, firewall, WAF or the site itself).")
+        print("     Every uncached pair will come back blank.")
+        return False
+
+    print(f"  HTTP {d['http_status']}, {d['bytes']} bytes, "
+          f"{d['tables_found']} tables, {d['rows_found']} rows")
+    print(f"  parsed: {d['parsed_stations']} stations, {d['parsed_distance']} km")
+    print(f"  route head: {d['route_head']}")
+    if d.get("looks_like_login_or_error"):
+        print("  WARNING: response mentions login/session/error - check the snippet")
+    print(f"  snippet: {d['snippet'][:200]}")
+
+    if d["parsed_stations"] == 0:
+        print("  -> Reachable but nothing parsed. Either the POST field names")
+        print("     changed, or the results table layout did. Compare the POST")
+        print("     in DevTools against STATIC_FIELDS/SRC_FIELD/DEST_FIELD.")
+        return False
+    print("  -> Portal and parser are both working.")
+    return True
+
+
+def check_od(path):
+    print(f"\n--- 2. Cache coverage for {path} ---")
+    od = InputValidator().validate_od_data(pd.read_excel(path))
+    pairs = {(norm_code(r['From Station Code']), norm_code(r['To Station Code']))
+             for _, r in od.iterrows()}
+    print(f"  {len(od)} rows, {len(pairs)} unique OD pairs")
+
+    bad = sorted({c for p in pairs for c in p if not CODE_OK(c)})
+    if bad:
+        print(f"  MALFORMED CODES ({len(bad)}): {bad[:15]}")
+        print("  -> These will never match RBS. Check the source workbook.")
+
+    cache = RBSCache()
+    counts = Counter()
+    missing = []
+    for src, dest in pairs:
+        row = cache.get_route(src, dest)
+        counts[row['status'] if row else 'NOT CACHED'] += 1
+        if not row or row['status'] != 'SUCCESS':
+            missing.append((src, dest))
+
+    for status, n in counts.most_common():
+        print(f"  {status:<12} {n:>6}  ({100 * n / len(pairs):.1f}%)")
+
+    if missing:
+        print(f"\n  {len(missing)} pair(s) need a live fetch, e.g. {missing[:8]}")
+        print("  -> These are the rows whose IR Distance will be blank if the")
+        print("     portal is unreachable.")
+    else:
+        print("\n  Every pair is cached. IR Distance should be fully populated;")
+        print("  if it is not, the problem is downstream of the scraper.")
+    return missing
+
+
+def prove_live(missing):
+    """Fetch a couple of genuinely-uncached pairs so 'fetched' is provably > 0."""
+    print("\n--- 3. Live fetch proof ---")
+    sample = missing[:3]
+    if not sample:
+        print("  Nothing uncached to test. Forcing one refetch instead.")
+        cache = RBSCache()
+        sample = [("NGP", "BPL")]
+        cache.invalidate(sample)
+
+    sc = RBSScraper()
+    sc.get_routes_batch(sample)
+    print(f"  {sc.stats}")
+    if sc.stats["fetched"]:
+        print("  -> Confirmed: routes are coming from the live portal.")
+    else:
+        print(f"  -> No live fetch succeeded. last_error: {sc.last_error}")
+
+
+if __name__ == "__main__":
+    ok = check_portal()
+    missing = []
+    if len(sys.argv) > 1:
+        missing = check_od(sys.argv[1])
+    if ok:
+        prove_live(missing)
+    else:
+        print("\nSkipping live-fetch proof: portal unreachable.")
