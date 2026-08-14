@@ -1,6 +1,6 @@
 import pandas as pd
 from agents.agent_1_validator import InputValidator
-from agents.agent_2_rbs_scraper import RBSScraper
+from agents.agent_2_rbs_scraper import RBSScraper, norm_code
 from agents.agent_3_mapper import CorridorMapper
 from agents.agent_4_diversion import DiversionEngine
 from agents.agent_5_scenario import ScenarioFilter
@@ -37,7 +37,8 @@ class WorkflowOrchestrator:
         # Extract unique OD pairs
         od_pairs = []
         for _, row in clean_od.iterrows():
-            od_pairs.append((row['From Station Code'], row['To Station Code']))
+            od_pairs.append((norm_code(row['From Station Code']),
+                             norm_code(row['To Station Code'])))
             
         # Agent 2: Fetch Routes in Batch
         route_cache = scraper.get_routes_batch(od_pairs)
@@ -45,8 +46,10 @@ class WorkflowOrchestrator:
         if progress_callback: progress_callback(50, "Mapping Corridors and Decision Engine (Agents 3, 4)...")
         
         for i, (idx, row) in enumerate(clean_od.iterrows()):
-            src = row['From Station Code']
-            dest = row['To Station Code']
+            # Same normalisation the scraper used to build its keys - otherwise
+            # the lookup below misses and IR Distance renders blank.
+            src = norm_code(row['From Station Code'])
+            dest = norm_code(row['To Station Code'])
             
             # Retrieve from our fetched batch
             route_data = route_cache.get((src, dest))
@@ -64,6 +67,7 @@ class WorkflowOrchestrator:
             # Combine results
             res_row = row.copy()
             res_row['IR Distance'] = distance
+            res_row['Route Source'] = scraper.pair_status.get((src, dest), 'UNKNOWN')
             res_row['Route'] = " -> ".join(route_sequence) if route_sequence else ""
             res_row['EWDFC overlap'] = "YES" if mapping['overlap'] else "NO"
             res_row['Entry IR'] = mapping['entry_ir']
@@ -95,6 +99,13 @@ class WorkflowOrchestrator:
         if progress_callback: progress_callback(95, "Running QA/Audit (Agent 7)...")
         exception_log = audit.run_audit(clean_od, master_df, clean_dfc)
 
+        # Surface where the routes actually came from. Without this the run
+        # looks identical whether RBS answered, was unreachable, or was never
+        # contacted because every pair was already cached.
+        route_stats = dict(scraper.stats)
+        route_stats['last_error'] = scraper.last_error
+        route_stats['unique_pairs'] = len(set(od_pairs))
+
         if progress_callback: progress_callback(100, "Processing Complete!")
 
         return {
@@ -104,5 +115,6 @@ class WorkflowOrchestrator:
             "non_eligible": scenarios["threshold_2_non_eligible"] if self.threshold == 2 else scenarios["threshold_3_non_eligible"],
             "station_summary": station_traffic,
             "route_combos": route_combos,
-            "exception_log": exception_log
+            "exception_log": exception_log,
+            "route_stats": route_stats
         }
