@@ -85,6 +85,23 @@ _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 norm_code = normalise_station_code
 
 
+def _code_from_cell(cell):
+    """The station code out of a route cell, ignoring what is nested in it.
+
+    The code cell is not just a code. A station with sidings carries a link
+    after it, so the cell reads `GDYA Sidings: [MPBG, THSG]`, and joining the
+    cell's strings with a space produced exactly that -- which then failed the
+    code pattern, and the station was skipped without a word. Every station
+    with sidings vanished from every route parsed this way: 8 of 24 survived on
+    BBTR -> BIA, the destination among the casualties.
+
+    Joining with a newline instead keeps the link text on its own line, so the
+    first line is the code. The pattern check stays as strict as it was -- it
+    was never the problem, and it is what rejects the stray one-letter cells.
+    """
+    return cell.get_text("\n", strip=True).split("\n")[0].strip().upper()
+
+
 def is_usable_route(source, destination, route_sequence):
     """Is this parse a route, or the portal echoing the origin back?
 
@@ -224,7 +241,7 @@ class RBSScraper:
             if len(cols) <= max(code_i, dist_i):
                 continue
 
-            code = cols[code_i].get_text(" ", strip=True).split("\n")[0].strip().upper()
+            code = _code_from_cell(cols[code_i])
             if not _CODE_RE.match(code):
                 continue
             codes.append(code)
@@ -295,7 +312,7 @@ class RBSScraper:
             cols = row.find_all("td")
             if len(cols) <= 3:
                 continue
-            code = cols[1].get_text(" ", strip=True).split("\n")[0].strip().upper()
+            code = _code_from_cell(cols[1])
             if not _CODE_RE.match(code):
                 continue
             name = cols[2].get_text(" ", strip=True)
@@ -387,7 +404,11 @@ class RBSScraper:
                 raise
             return source, destination, None, [], [], None
 
-        if not route_sequence:
+        # A single station returned for two different codes is the portal
+        # echoing the origin back, not a route. Recorded as NO_ROUTE for the
+        # same reason an empty parse is: a 0 km SUCCESS row would be believed
+        # by everything downstream and never looked at again.
+        if not is_usable_route(source, destination, route_sequence):
             self._bump("no_route")
             self._mark(source, destination, "NO_ROUTE")
             self.cache.set_route(source, destination, 0, [], [], status="FAILED",

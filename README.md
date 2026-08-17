@@ -128,6 +128,22 @@ python tools/refresh_cache.py --db cache.db --workers 12 --drift-report drift.cs
 Run it against a cache on local disk rather than a Windows-mounted path; SQLite locking
 over DrvFs is slow and unreliable. The run is resumable and reports which routes changed.
 
+To repair rows that a past parser got wrong:
+
+```bash
+python tools/repair_degenerate_routes.py --db cache.db --dry-run
+python tools/repair_degenerate_routes.py --db cache.db --report repair.csv
+```
+
+It re-fetches every `SUCCESS` row the current parser would never have written — one with
+fewer than two stations between two different places, or one with a token in its sequence
+that is not a station code — and re-decides each on the evidence. Rows the portal errors on
+are left untouched, and the database is backed up first.
+
+**There is one route parser**, `RBSScraper._parse`. There were briefly two, and they
+disagreed: one dropped every station that had sidings, the other admitted table headers as
+stations. If you find yourself writing a second one, that is the bug.
+
 ## Looking up routes by hand
 
 The RBS web form answers one OD pair at a time and expects you to already know the station

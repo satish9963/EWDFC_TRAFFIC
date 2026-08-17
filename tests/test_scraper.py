@@ -140,6 +140,74 @@ def test_empty_response_parses_to_nothing_rather_than_raising():
     assert RBSScraper._parse("<html><body>No route found</body></html>") == (0.0, [], [])
 
 
+# The real servlet markup for a station that has sidings: the code cell holds
+# the code *and* a link listing them. Taken from a live BBTR -> BIA response.
+SIDINGS_HTML = """
+<TR class=" serving-stn ">
+  <TD width="29"><A href="javascript:getInterStation(1,'NGP','CR')">+</A></TD>
+  <TD align="center">
+    GDYA
+    <a href="javascript:viewServingStation('[MPBG, THSG]')">Sidings: [MPBG, THSG]</a>
+  </TD>
+  <TD align="center"><b>  Ghoradongri</b></TD>
+  <TD align="center">11.86</TD>
+</TR>
+<TR>
+  <TD width="29"></TD><TD align="center">BZU</TD>
+  <TD align="center"><b>Betul</b></TD><TD align="center">24.5</TD>
+</TR>
+<TR>
+  <TD width="29"></TD><TD align="center">G</TD>
+  <TD align="center"><b>stray one-letter cell</b></TD><TD align="center">30</TD>
+</TR>
+<TR class=" serving-stn ">
+  <TD width="29"><A href="javascript:getInterStation(3,'NGP','CR')">+</A></TD>
+  <TD align="center">
+    BIA
+    <a href="javascript:viewServingStation('[BSPC, JCGA]')">Sidings: [BSPC, JCGA]</a>
+  </TD>
+  <TD align="center"><b>Bhilai</b></TD>
+  <TD align="center">118.6</TD>
+</TR>
+"""
+
+
+def test_a_station_with_sidings_is_not_dropped():
+    """The bug this pins cost 16 of 24 stations on a real route.
+
+    A station with sidings carries a link inside the code cell, so joining the
+    cell's strings with a space produced `GDYA Sidings: [MPBG, THSG]`, which
+    failed the code pattern -- and the station was skipped in silence. The
+    destination was among the stations lost, so a route could be recorded as
+    never reaching where it was going.
+    """
+    _distance, codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert "GDYA" in codes
+    assert "BIA" in codes, "the destination itself was being dropped"
+
+
+def test_the_strict_code_rule_still_rejects_junk_cells():
+    """Fixing the extraction must not turn into accepting anything."""
+    _distance, codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert codes == ["GDYA", "BZU", "BIA"]   # the one-letter cell stays out
+
+
+def test_distance_recovers_when_the_dropped_rows_come_back():
+    """Distance is the max over kept rows, so dropped rows shortened routes.
+
+    The destination carries sidings here, exactly as BIA does on the real
+    response, so losing it under-reads the route's total length.
+    """
+    distance, _codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert distance == pytest.approx(118.6)  # not 24.5 from a truncated read
+
+
+def test_parse_detailed_reads_the_same_sidings_cell():
+    stations = RBSScraper.parse_detailed(SIDINGS_HTML)
+    assert [s["code"] for s in stations] == ["GDYA", "BZU", "BIA"]
+    assert stations[0]["name"] == "Ghoradongri"
+
+
 def test_parse_detailed_keeps_the_names_parse_throws_away():
     """The pipeline needs codes; a human reading a route needs names too."""
     stations = RBSScraper.parse_detailed(POSITIONAL_HTML)
