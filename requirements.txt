@@ -5,3 +5,11 @@ openpyxl>=3.1
 beautifulsoup4>=4.12
 requests>=2.32
 python-dotenv>=1.0
+PyYAML>=6.0
+defusedxml>=0.7
+shapely>=2.0
+pyproj>=3.6
+# geopandas is optional and deliberately not pinned here: it is needed only to
+# read shapefiles, and it pulls GDAL, which turns a fast wheel install into a
+# slow source build on hosts without system libraries. KML, KMZ and GeoJSON
+# alignments work without it.

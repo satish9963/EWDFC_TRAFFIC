@@ -1,0 +1,128 @@
+# Project presets.
+#
+# A "project" is a railway corridor being assessed for traffic diversion. The
+# pipeline itself is corridor-agnostic: what changes between projects is the
+# corridor's name, how a route is judged to interact with it, and how much
+# interaction counts as divertible. Those three things live here.
+#
+# Every field is overridable in the sidebar, so a preset is a starting point
+# rather than a constraint. Add a project by copying a block and editing it.
+
+version: 1
+default: ewdfc
+
+projects:
+
+  ewdfc:
+    name: Eastern-Western Dedicated Freight Corridor
+    short_name: EWDFC
+    description: >
+      Freight diversion assessment for the EWDFC alignment. Reproduces the
+      behaviour this tool shipped with: corridor membership by exact station
+      code, eligibility by count of corridor stations touched.
+    matching:
+      by_code: true          # route station code appears in the corridor list
+      by_proximity: false    # route station falls within buffer_km of the alignment
+      buffer_km: 5.0
+    eligibility:
+      rule: min_stations     # min_stations | min_corridor_km | min_corridor_share
+      threshold: 3
+      thresholds_offered: [2, 3, 4, 5]
+      min_corridor_km: null
+      min_corridor_share: null
+    cache:
+      max_age_days: 365
+
+  wdfc:
+    name: Western Dedicated Freight Corridor
+    short_name: WDFC
+    description: JNPT-Dadri corridor. Same assessment basis as EWDFC.
+    matching:
+      by_code: true
+      by_proximity: false
+      buffer_km: 5.0
+    eligibility:
+      rule: min_stations
+      threshold: 3
+      thresholds_offered: [2, 3, 4, 5]
+      min_corridor_km: null
+      min_corridor_share: null
+    cache:
+      max_age_days: 365
+
+  edfc:
+    name: Eastern Dedicated Freight Corridor
+    short_name: EDFC
+    description: Ludhiana-Sonnagar corridor. Same assessment basis as EWDFC.
+    matching:
+      by_code: true
+      by_proximity: false
+      buffer_km: 5.0
+    eligibility:
+      rule: min_stations
+      threshold: 3
+      thresholds_offered: [2, 3, 4, 5]
+      min_corridor_km: null
+      min_corridor_share: null
+    cache:
+      max_age_days: 365
+
+  new_line:
+    name: New railway line
+    short_name: New line
+    description: >
+      A proposed line that does not exist on the IR network yet, so its stations
+      have no IR codes to match on. Proximity matching against the alignment is
+      the only thing that can work here, and the buffer is wider because
+      catchment, not track sharing, is what is being measured.
+    matching:
+      by_code: true
+      by_proximity: true
+      buffer_km: 15.0
+    eligibility:
+      rule: min_corridor_km
+      threshold: 2
+      thresholds_offered: [1, 2, 3, 4, 5]
+      min_corridor_km: 50.0
+      min_corridor_share: null
+    cache:
+      max_age_days: 365
+
+  doubling_upgrade:
+    name: Doubling / gauge conversion / upgrade
+    short_name: Upgrade
+    description: >
+      An existing route being upgraded. The stations already carry IR codes, so
+      code matching is reliable; what matters is how much of each flow actually
+      runs along the section, not merely that it clips one end.
+    matching:
+      by_code: true
+      by_proximity: true
+      buffer_km: 3.0
+    eligibility:
+      rule: min_corridor_share
+      threshold: 2
+      thresholds_offered: [1, 2, 3, 4, 5]
+      min_corridor_km: null
+      min_corridor_share: 0.25
+    cache:
+      max_age_days: 365
+
+  custom:
+    name: Custom corridor
+    short_name: Custom
+    description: >
+      Neutral defaults for a corridor that does not fit the other presets. Set
+      the matching mode and eligibility rule in the sidebar.
+    matching:
+      by_code: true
+      by_proximity: true
+      buffer_km: 5.0
+    eligibility:
+      rule: min_stations
+      threshold: 2
+      thresholds_offered: [1, 2, 3, 4, 5, 6]
+      min_corridor_km: null
+      min_corridor_share: null
+    cache:
+      max_age_days: 365

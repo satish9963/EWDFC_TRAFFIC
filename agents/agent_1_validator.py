@@ -1,79 +1,226 @@
+"""Agent 1 -- validate and normalise the two input workbooks.
+
+The tool is only as general as this agent is forgiving. Every railway project
+hands over its OD data in a different shape: IR's own exports use FROMSTTN and
+TOSTTN, consultants' workbooks use "Origin Code", client submissions bury the
+headers under a merged title row. Rejecting those is what would confine this
+pipeline to the one corridor it was written for, so headers are resolved through
+the alias table in core.schema rather than matched literally.
+
+What is *not* forgiving: tonnage units. Figures are carried through in whatever
+unit the workbook uses, and no conversion is attempted, because a workbook that
+says MTPA and one that says tonnes look identical to a parser and guessing
+wrong changes a result by a factor of a million.
+"""
 import pandas as pd
-from config import OD_COLUMNS
+
+from core import schema
+
+
+class ValidationReport:
+    """What the validator did, so the UI can show it rather than assume it."""
+
+    def __init__(self):
+        self.renamed = {}
+        self.dropped_missing_codes = 0
+        self.dropped_duplicates = 0
+        self.filled_columns = []
+        self.rows_in = 0
+        self.rows_out = 0
+        self.notes = []
+
+    def as_dict(self):
+        return {
+            "rows_in": self.rows_in,
+            "rows_out": self.rows_out,
+            "renamed": self.renamed,
+            "dropped_missing_codes": self.dropped_missing_codes,
+            "dropped_duplicates": self.dropped_duplicates,
+            "filled_columns": self.filled_columns,
+            "notes": self.notes,
+        }
+
+
+def drop_empty_columns(df):
+    """Discard columns that are entirely empty.
+
+    Real client workbooks arrive with enormous phantom column ranges -- the
+    EWDFC junction-chainage sheet is 76 rows by 16,382 columns, all but 9 of
+    them empty, because somebody once formatted to the end of the sheet. Left
+    in, they dominate every downstream operation and make header resolution
+    scan sixteen thousand names to find nine.
+    """
+    if df.empty:
+        return df
+    keep = [c for c in df.columns if not df[c].isna().all()]
+    return df[keep] if keep else df
+
+
+def _promote_header_row(df, expected_hint_columns, max_scan=5):
+    """Handle workbooks whose real header sits below a title row.
+
+    Exports frequently open with a merged banner ("Base Year (2024-25)"), which
+    pandas reads as the header and turns the true headers into row 0. The giveaway
+    is a frame full of 'Unnamed:' columns.
+    """
+    unnamed = sum(1 for c in df.columns if str(c).startswith("Unnamed:"))
+    if unnamed < max(1, len(df.columns) // 2):
+        return df, False
+
+    for row_index in range(min(max_scan, len(df))):
+        candidate = df.iloc[row_index]
+        resolved = schema.resolve_columns(candidate.values)
+        recognised = set(resolved.values()) | {
+            schema.ALIAS_TO_CANONICAL.get(schema.normalise(v))
+            for v in candidate.values if v is not None
+        }
+        if len(recognised & set(expected_hint_columns)) >= 2:
+            promoted = df.iloc[row_index + 1:].copy()
+            promoted.columns = candidate.values
+            return promoted.reset_index(drop=True), True
+    return df, False
+
+
+def _to_number(series):
+    """Coerce a column that may carry thousands separators or stray text."""
+    cleaned = (series.astype(str)
+               .str.replace(",", "", regex=False)
+               .str.replace(" ", "", regex=False)
+               .str.strip())
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
+
 
 class InputValidator:
-    def __init__(self):
-        pass
+    def validate_od_data(self, df, report=None):
+        report = report or ValidationReport()
+        report.rows_in = len(df)
+        df = drop_empty_columns(df)
 
-    def validate_od_data(self, df):
-        """
-        Validates the OD Traffic Excel data.
-        Returns a cleaned dataframe.
-        """
-        # If the first row contains the actual headers (common when exported from internal systems)
-        if not df.empty and str(df.columns[0]).startswith('Unnamed:') and ('FROMSTTN' in df.iloc[0].values or 'From Station Code' in df.iloc[0].values):
-            df.columns = df.iloc[0]
-            df = df.drop(0).reset_index(drop=True)
+        df, promoted = _promote_header_row(df, [schema.FROM_CODE, schema.TO_CODE])
+        if promoted:
+            report.notes.append("Header row found below a title row and promoted.")
 
-        # Handle alternative column names from different formats
-        column_map = {
-            'FROMSTTN': 'From Station Code',
-            'FROMNAME': 'From Station Name',
-            'TOSTTN': 'To Station Code',
-            'TONAME': 'To Station Name',
-            'No.of Rakes/No. of Units': 'No. of Rakes / Wagon Units'
-        }
-        df = df.rename(columns=column_map)
-        
-        # Remove duplicated columns (keep first) to prevent DataFrame attribute errors
+        mapping = schema.resolve_columns(df.columns)
+        if mapping:
+            df = df.rename(columns=mapping)
+            report.renamed = {str(k): v for k, v in mapping.items()}
+
         df = df.loc[:, ~df.columns.duplicated()]
-        
-        # If Commodity is missing in the alternative format, just fill it with UNKNOWN
-        if 'Commodity' not in df.columns:
-            df['Commodity'] = 'UNKNOWN'
 
-        # Check required columns
-        missing_cols = [col for col in OD_COLUMNS if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns in OD Data: {missing_cols}")
+        missing = [c for c in schema.OD_REQUIRED if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"The OD workbook is missing {missing}. Recognised columns were "
+                f"{sorted(set(df.columns) & set(schema.OD_COLUMNS))}. Rename the "
+                f"origin and destination code columns, or download the blank template."
+            )
 
-        # Drop rows where From or To Station Code is empty
-        clean_df = df.dropna(subset=['From Station Code', 'To Station Code']).copy()
+        # Optional columns are filled rather than demanded: a two-column OD list
+        # is a legitimate input for a first-pass corridor screen.
+        for column, default in (
+            (schema.COMMODITY, "UNKNOWN"),
+            (schema.TONNAGE, 0),
+            (schema.UNITS, 0),
+            (schema.FROM_NAME, ""),
+            (schema.TO_NAME, ""),
+        ):
+            if column not in df.columns:
+                df[column] = default
+                report.filled_columns.append(column)
 
-        # Clean strings
-        clean_df['From Station Code'] = clean_df['From Station Code'].astype(str).str.strip().str.upper()
-        clean_df['To Station Code'] = clean_df['To Station Code'].astype(str).str.strip().str.upper()
+        clean = df.dropna(subset=schema.OD_REQUIRED).copy()
+        report.dropped_missing_codes = len(df) - len(clean)
 
-        # Remove duplicate rows
-        initial_count = len(clean_df)
-        clean_df.drop_duplicates(inplace=True)
-        dropped_duplicates = initial_count - len(clean_df)
+        for column in (schema.FROM_CODE, schema.TO_CODE):
+            clean[column] = clean[column].astype(str).str.strip().str.upper()
 
-        # Fill NaNs in numeric columns
-        if 'Annual Tonnage' in clean_df.columns:
-            # Handle possible string formatting with commas (e.g. "12,345")
-            clean_df['Annual Tonnage'] = clean_df['Annual Tonnage'].astype(str).str.replace(',', '', regex=False)
-            clean_df['Annual Tonnage'] = pd.to_numeric(clean_df['Annual Tonnage'], errors='coerce').fillna(0)
-            
-        if 'No. of Rakes / Wagon Units' in clean_df.columns:
-            clean_df['No. of Rakes / Wagon Units'] = clean_df['No. of Rakes / Wagon Units'].astype(str).str.replace(',', '', regex=False)
-            clean_df['No. of Rakes / Wagon Units'] = pd.to_numeric(clean_df['No. of Rakes / Wagon Units'], errors='coerce').fillna(0)
-            
-        print(f"Validated OD Data. Dropped {dropped_duplicates} duplicates. Total valid rows: {len(clean_df)}")
-        return clean_df
+        # Codes that survived as empty strings or pandas' "NAN" text.
+        blank = clean[schema.FROM_CODE].isin(["", "NAN", "NONE"]) | \
+            clean[schema.TO_CODE].isin(["", "NAN", "NONE"])
+        report.dropped_missing_codes += int(blank.sum())
+        clean = clean[~blank]
 
-    def validate_dfc_stations(self, df):
+        before = len(clean)
+        clean = clean.drop_duplicates()
+        report.dropped_duplicates = before - len(clean)
+
+        for column in (schema.TONNAGE, schema.UNITS):
+            if column in clean.columns:
+                clean[column] = _to_number(clean[column])
+
+        if schema.COMMODITY in clean.columns:
+            clean[schema.COMMODITY] = (clean[schema.COMMODITY].fillna("UNKNOWN")
+                                       .astype(str).str.strip().replace("", "UNKNOWN"))
+
+        report.rows_out = len(clean)
+        if clean.empty:
+            raise ValueError(
+                "No usable OD rows survived validation -- every row was missing an "
+                "origin or destination station code."
+            )
+        return clean.reset_index(drop=True), report
+
+    def validate_corridor_stations(self, df, report=None):
+        """Validate the corridor station list.
+
+        Only the station code is required. Coordinates and chainage unlock
+        proximity matching and corridor-length metrics respectively, and their
+        absence disables those features rather than failing the run.
         """
-        Validates DFC Stations data.
-        """
-        required_cols = ['DFC Station Code', 'Latitude', 'Longitude']
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing required columns in DFC Stations Data: {missing_cols}")
+        report = report or ValidationReport()
+        report.rows_in = len(df)
+        df = drop_empty_columns(df)
 
-        clean_df = df.dropna(subset=required_cols).copy()
-        clean_df['DFC Station Code'] = clean_df['DFC Station Code'].astype(str).str.strip().str.upper()
-        clean_df['Latitude'] = pd.to_numeric(clean_df['Latitude'], errors='coerce')
-        clean_df['Longitude'] = pd.to_numeric(clean_df['Longitude'], errors='coerce')
-        clean_df = clean_df.dropna(subset=['Latitude', 'Longitude'])
-        return clean_df
+        df, promoted = _promote_header_row(df, [schema.CORRIDOR_CODE, schema.CORRIDOR_NAME])
+        if promoted:
+            report.notes.append("Header row found below a title row and promoted.")
+
+        mapping = schema.resolve_columns(df.columns)
+        if mapping:
+            df = df.rename(columns=mapping)
+            report.renamed = {str(k): v for k, v in mapping.items()}
+
+        df = df.loc[:, ~df.columns.duplicated()]
+
+        if schema.CORRIDOR_CODE not in df.columns:
+            raise ValueError(
+                f"The corridor station list needs a station code column. Recognised "
+                f"columns were {sorted(set(df.columns) & set(schema.CORRIDOR_COLUMNS))}. "
+                f"Any of 'Corridor Station Code', 'DFC Station Code' or 'Station Code' works."
+            )
+
+        clean = df.dropna(subset=[schema.CORRIDOR_CODE]).copy()
+        clean[schema.CORRIDOR_CODE] = (clean[schema.CORRIDOR_CODE]
+                                       .astype(str).str.strip().str.upper())
+        clean = clean[~clean[schema.CORRIDOR_CODE].isin(["", "NAN", "NONE"])]
+
+        for column in (schema.LATITUDE, schema.LONGITUDE, schema.CHAINAGE):
+            if column in clean.columns:
+                clean[column] = pd.to_numeric(clean[column], errors="coerce")
+
+        has_coordinates = (
+            schema.LATITUDE in clean.columns and schema.LONGITUDE in clean.columns
+            and clean[[schema.LATITUDE, schema.LONGITUDE]].notna().all(axis=1).any()
+        )
+        if not has_coordinates:
+            report.notes.append(
+                "No usable coordinates on the station list; proximity matching will "
+                "rely on the bundled gazetteer or be unavailable."
+            )
+        if schema.CHAINAGE not in clean.columns or clean[schema.CHAINAGE].isna().all():
+            report.notes.append(
+                "No chainage on the station list; corridor length used will be "
+                "derived from the alignment if one is supplied."
+            )
+
+        before = len(clean)
+        clean = clean.drop_duplicates(subset=[schema.CORRIDOR_CODE], keep="first")
+        report.dropped_duplicates = before - len(clean)
+        report.rows_out = len(clean)
+
+        if clean.empty:
+            raise ValueError("The corridor station list contains no usable station codes.")
+        return clean.reset_index(drop=True), report
+
+    # Kept so existing callers and tests that used the DFC-era name keep working.
+    validate_dfc_stations = validate_corridor_stations

@@ -1,16 +1,34 @@
+"""Runtime paths and portal settings.
+
+Column names and project behaviour do not live here -- see core/schema.py and
+projects.yaml. What remains is genuinely global: where the app may write, where
+the route cache is, and how to reach the RBS portal.
+"""
 import os
 import shutil
 from pathlib import Path
 
-# Paths
 BASE_DIR = Path(__file__).resolve().parent
 
 
+def _env(name, legacy_name=None, default=None):
+    """Read a RAIL_* variable, falling back to the older EWDFC_* spelling.
+
+    The deployed app and its documentation used EWDFC_CACHE_DB and
+    EWDFC_RUNTIME_DIR. Renaming them outright would break a running deployment
+    for no benefit, so both are accepted.
+    """
+    value = os.environ.get(name)
+    if value is None and legacy_name:
+        value = os.environ.get(legacy_name)
+    return value if value is not None else default
+
+
 def _first_writable(candidate):
-    """Return candidate if we can actually create files in it, else None."""
+    """Return candidate if files can actually be created in it, else None."""
     try:
         candidate.mkdir(parents=True, exist_ok=True)
-        probe = candidate / ".ewdfc_write_probe"
+        probe = candidate / ".write_probe"
         probe.touch()
         probe.unlink()
         return candidate
@@ -18,52 +36,33 @@ def _first_writable(candidate):
         return None
 
 
-# Locally the app directory is writable, so RUNTIME_DIR is just BASE_DIR and
-# every path below is unchanged. On hosts that mount the app read-only we fall
-# back to a scratch directory so imports don't crash at startup.
-RUNTIME_DIR = _first_writable(BASE_DIR) or Path(os.environ.get("EWDFC_RUNTIME_DIR", "/tmp/ewdfc"))
+# Locally the app directory is writable and RUNTIME_DIR is just BASE_DIR. On
+# hosts that mount the app read-only we fall back to a scratch directory so
+# imports do not crash at startup.
+RUNTIME_DIR = _first_writable(BASE_DIR) or Path(
+    _env("RAIL_RUNTIME_DIR", "EWDFC_RUNTIME_DIR", "/tmp/rail-corridor")
+)
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 DATA_DIR = RUNTIME_DIR / "data"
 OUTPUT_DIR = RUNTIME_DIR / "output"
-CACHE_DB = Path(os.environ.get("EWDFC_CACHE_DB", RUNTIME_DIR / "cache.db"))
-
-# Create directories if they don't exist
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Seed the route cache from the bundled copy the first time we run on a fresh host
+CACHE_DB = Path(_env("RAIL_CACHE_DB", "EWDFC_CACHE_DB", RUNTIME_DIR / "cache.db"))
+
+# Seed the route cache from the bundled copy the first time we run on a fresh
+# host. The cache is corridor-independent, so every project benefits from it.
 _SEED_CACHE = BASE_DIR / "cache.db"
 if not CACHE_DB.exists() and _SEED_CACHE.exists() and _SEED_CACHE != CACHE_DB:
     shutil.copy2(_SEED_CACHE, CACHE_DB)
 
-# Default Input Paths (can be overridden via UI)
-DEFAULT_OD_FILE = DATA_DIR / "OD_Traffic.xlsx"
-DEFAULT_EWDFC_KML = DATA_DIR / "EWDFC_Alignment.kml"
-DEFAULT_DFC_STATIONS = DATA_DIR / "DFC_Stations.xlsx"
+# Station gazetteer used for proximity matching; absent is fine.
+GAZETTEER_PATH = Path(_env("RAIL_GAZETTEER", None, BASE_DIR / "data" / "stations.csv"))
 
-# RBS Portal URL
 RBS_URL = "https://rbs.indianrail.gov.in/ShortPath/ShortPathServlet"
 
-# Application Settings
-DEFAULT_THRESHOLD = 3
-SUPPORTED_THRESHOLDS = [2, 3]
+APP_TITLE = "Rail Corridor Traffic Assessment"
+APP_ICON = "🚂"
 
-# Data columns expected
-OD_COLUMNS = [
-    "From Station Code",
-    "From Station Name",
-    "To Station Code",
-    "To Station Name",
-    "Commodity",
-    "Annual Tonnage",
-    "No. of Rakes / Wagon Units"
-]
-
-DFC_STATION_COLUMNS = [
-    "DFC Station Code",
-    "Station Name",
-    "Chainage",
-    "Latitude",
-    "Longitude"
-]
+MAX_UPLOAD_ROWS_WARNING = 100_000

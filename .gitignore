@@ -1,25 +1,38 @@
 # Deny-all allowlist. This repo is published publicly, and the project folder
 # holds client freight data, reports and results that must never be pushed.
 # Everything is ignored by default; only the files the app needs are re-added.
+#
+# A new source file will NOT be tracked until a "!" line is added for it.
 /*
 
 !.gitignore
+!.gitattributes
 !README.md
 !Dockerfile
 !requirements.txt
 !app.py
 !config.py
+!projects.yaml
 !cache.db
 !core/
 !agents/
 !ui/
 !tests/
+!tools/
 !.streamlit/
 
 # ...but never the compiled artefacts inside those packages
 __pycache__/
 *.pyc
 
-# Runtime scratch dirs created by config.py
-data/
+# Runtime scratch dirs created by config.py. The station gazetteer lives under
+# data/ but is a bundled asset rather than scratch, so it is re-added.
+#
+# Note the "data/*" rather than "data/". Git will not re-include a file whose
+# parent directory is excluded, so "data/" followed by "!data/stations.csv"
+# silently keeps the gazetteer out of the repo. Excluding the directory's
+# *contents* leaves the directory itself readable, and the negation works.
+!data/
+data/*
+!data/stations.csv
 output/

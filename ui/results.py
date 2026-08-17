@@ -3,6 +3,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from core import schema
 from ui.format import display_columns, format_number, format_percent
 
 # Palette validated for the light surface #fcfcfb (dataviz six checks).
@@ -14,8 +15,6 @@ SURFACE = "#fcfcfb"
 INK_SECONDARY = "#52514e"
 GRID = "#e1e0d9"
 AXIS = "#c3c2b7"
-
-TONNAGE = "Annual Tonnage"
 
 
 def _style(chart):
@@ -32,47 +31,53 @@ def _style(chart):
     )
 
 
-def _headline(master, exceptions, threshold):
-    total_t = master[TONNAGE].sum() if TONNAGE in master else 0
-    eligible = master[master["Eligible"] == "YES"] if "Eligible" in master else master.iloc[0:0]
-    eligible_t = eligible[TONNAGE].sum() if TONNAGE in eligible else 0
+def _headline(master, exceptions, criterion):
+    total_tonnage = master[schema.TONNAGE].sum() if schema.TONNAGE in master else 0
+    eligible = (master[master[schema.ELIGIBLE] == "YES"]
+                if schema.ELIGIBLE in master else master.iloc[0:0])
+    eligible_tonnage = eligible[schema.TONNAGE].sum() if schema.TONNAGE in eligible else 0
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("OD routes processed", format_number(len(master)))
-    c2.metric(
-        f"Divertible routes (T{threshold})",
-        format_number(len(eligible)),
-        help="Routes touching at least the threshold number of DFC stations.",
-    )
+    c2.metric("Divertible routes", format_number(len(eligible)), help=criterion)
     c3.metric(
         "Divertible tonnage",
-        format_number(eligible_t),
-        delta=f"{format_percent(eligible_t, total_t)} of {format_number(total_t)}",
+        format_number(eligible_tonnage),
+        delta=f"{format_percent(eligible_tonnage, total_tonnage)} of "
+              f"{format_number(total_tonnage)}",
         delta_color="off",
     )
     c4.metric("Exceptions raised", format_number(len(exceptions)))
 
+    # Corridor length used only exists when chainage was available; showing it
+    # as zero when it is simply unknown would misrepresent the run.
+    if schema.CORRIDOR_KM in master and master[schema.CORRIDOR_KM].notna().any():
+        used = master.loc[master[schema.ELIGIBLE] == "YES", schema.CORRIDOR_KM]
+        d1, d2 = st.columns(2)
+        d1.metric("Mean corridor length used", f"{format_number(used.mean(), 1)} km")
+        d2.metric("Max corridor length used", f"{format_number(used.max(), 1)} km")
+
 
 def _station_chart(station_summary):
-    cols = ["entering_tonnage", "exiting_tonnage", "through_tonnage"]
-    if station_summary.empty or not all(c in station_summary for c in cols):
+    columns = schema.MOVEMENT_TONNAGE_COLUMNS
+    if station_summary.empty or not all(c in station_summary for c in columns):
         st.info("No station traffic to chart.")
         return
 
-    top = station_summary.nlargest(12, "total_tonnage")
-    if top["total_tonnage"].sum() == 0:
+    top = station_summary.nlargest(12, schema.TOTAL_TONNAGE)
+    if top[schema.TOTAL_TONNAGE].sum() == 0:
         st.info("No station traffic to chart.")
         return
 
     long = top.melt(
-        id_vars=["DFC Station Code", "total_tonnage"],
-        value_vars=cols,
+        id_vars=[schema.CORRIDOR_CODE, schema.TOTAL_TONNAGE],
+        value_vars=columns,
         var_name="Movement",
         value_name="Tonnage",
     )
     long["Movement"] = long["Movement"].str.replace("_tonnage", "", regex=False).str.capitalize()
 
-    order = alt.Y("DFC Station Code:N", sort="-x", title=None)
+    order = alt.Y(f"{schema.CORRIDOR_CODE}:N", sort="-x", title=None)
     bars = (
         alt.Chart(long)
         .mark_bar(cornerRadiusEnd=4, stroke=SURFACE, strokeWidth=2)
@@ -84,7 +89,7 @@ def _station_chart(station_summary):
                 scale=alt.Scale(domain=list(SERIES), range=list(SERIES.values())),
                 legend=alt.Legend(title=None),
             ),
-            tooltip=["DFC Station Code", "Movement", alt.Tooltip("Tonnage:Q", format=",.0f")],
+            tooltip=[schema.CORRIDOR_CODE, "Movement", alt.Tooltip("Tonnage:Q", format=",.0f")],
         )
     )
     # Direct totals: the relief required by the aqua contrast warning.
@@ -92,47 +97,49 @@ def _station_chart(station_summary):
         alt.Chart(top)
         .mark_text(align="left", dx=4, color=INK_SECONDARY, fontSize=11)
         .encode(
-            x=alt.X("total_tonnage:Q", title="Tonnage"),
+            x=alt.X(f"{schema.TOTAL_TONNAGE}:Q", title="Tonnage"),
             y=order,
-            text=alt.Text("total_tonnage:Q", format=",.0f"),
+            text=alt.Text(f"{schema.TOTAL_TONNAGE}:Q", format=",.0f"),
         )
     )
     st.altair_chart(_style((bars + labels).properties(height=340)), width="stretch")
 
 
 def _commodity_chart(master):
-    if "Commodity" not in master or TONNAGE not in master:
+    if schema.COMMODITY not in master or schema.TONNAGE not in master:
         st.info("No commodity column in this dataset.")
         return
-    eligible = master[master["Eligible"] == "YES"]
+    eligible = master[master[schema.ELIGIBLE] == "YES"]
     if eligible.empty:
-        st.info("No divertible traffic at this threshold.")
+        st.info("No divertible traffic on this basis.")
         return
 
-    by_commodity = (
-        eligible.groupby("Commodity", as_index=False)[TONNAGE].sum()
-        .nlargest(12, TONNAGE)
-    )
+    by_commodity = (eligible.groupby(schema.COMMODITY, as_index=False)[schema.TONNAGE].sum()
+                    .nlargest(12, schema.TONNAGE))
     chart = (
         alt.Chart(by_commodity)
         .mark_bar(cornerRadiusEnd=4, color=SINGLE_HUE)
         .encode(
-            x=alt.X(f"{TONNAGE}:Q", title="Divertible tonnage"),
-            y=alt.Y("Commodity:N", sort="-x", title=None),
-            tooltip=["Commodity", alt.Tooltip(f"{TONNAGE}:Q", format=",.0f")],
+            x=alt.X(f"{schema.TONNAGE}:Q", title="Divertible tonnage"),
+            y=alt.Y(f"{schema.COMMODITY}:N", sort="-x", title=None),
+            tooltip=[schema.COMMODITY, alt.Tooltip(f"{schema.TONNAGE}:Q", format=",.0f")],
         )
         .properties(height=320)
     )
     st.altair_chart(_style(chart), width="stretch")
 
 
-def _threshold_chart(results):
+def _threshold_chart(results, thresholds):
     rows = []
-    for t in (2, 3):
-        frame = results.get(f"threshold_{t}_eligible")
-        if frame is None or TONNAGE not in frame:
+    for threshold in thresholds:
+        frame = results.get(f"threshold_{threshold}_eligible")
+        if frame is None or schema.TONNAGE not in frame:
             continue
-        rows.append({"Threshold": f"T{t}", "Tonnage": frame[TONNAGE].sum(), "Routes": len(frame)})
+        rows.append({
+            "Threshold": f"T{threshold}",
+            "Tonnage": frame[schema.TONNAGE].sum(),
+            "Routes": len(frame),
+        })
     if not rows:
         st.info("Threshold comparison unavailable.")
         return
@@ -140,9 +147,9 @@ def _threshold_chart(results):
     data = pd.DataFrame(rows)
     bars = (
         alt.Chart(data)
-        .mark_bar(cornerRadiusEnd=4, color=SINGLE_HUE, size=48)
+        .mark_bar(cornerRadiusEnd=4, color=SINGLE_HUE, size=44)
         .encode(
-            x=alt.X("Threshold:N", title=None),
+            x=alt.X("Threshold:N", title=None, sort=list(data["Threshold"])),
             y=alt.Y("Tonnage:Q", title="Divertible tonnage"),
             tooltip=["Threshold", alt.Tooltip("Tonnage:Q", format=",.0f"), "Routes"],
         )
@@ -153,38 +160,120 @@ def _threshold_chart(results):
     st.altair_chart(_style((bars + labels).properties(height=300)), width="stretch")
 
 
-def render(results, threshold):
+def _corridor_profile(station_summary):
+    """Traffic against chainage -- the loading diagram a corridor study wants."""
+    if (schema.CHAINAGE not in station_summary
+            or station_summary[schema.CHAINAGE].isna().all()):
+        return False
+    data = station_summary.dropna(subset=[schema.CHAINAGE])
+    chart = (
+        alt.Chart(data)
+        .mark_area(color=SINGLE_HUE, opacity=0.25, line={"color": SINGLE_HUE})
+        .encode(
+            x=alt.X(f"{schema.CHAINAGE}:Q", title="Chainage (km)"),
+            y=alt.Y(f"{schema.TOTAL_TONNAGE}:Q", title="Total tonnage"),
+            tooltip=[schema.CORRIDOR_CODE, alt.Tooltip(f"{schema.CHAINAGE}:Q", format=",.1f"),
+                     alt.Tooltip(f"{schema.TOTAL_TONNAGE}:Q", format=",.0f")],
+        )
+        .properties(height=260)
+    )
+    st.altair_chart(_style(chart), width="stretch")
+    return True
+
+
+def _run_context(results):
+    """What this run actually did, stated rather than assumed."""
+    project = results["project"]
+    stats = results.get("route_stats", {})
+    bits = [f"**{project.name}** — {results['criterion']}."]
+
+    matching = []
+    if project.matching.by_code:
+        matching.append("station code")
+    if project.matching.by_proximity:
+        matching.append(f"within {project.matching.buffer_km:g} km of the alignment")
+    bits.append(f"Corridor membership by {' or '.join(matching)}.")
+
+    if results.get("chainage_source"):
+        bits.append(f"Chainage from the {results['chainage_source']}.")
+    elif results.get("geometry") is not None:
+        geometry = results["geometry"]
+        if geometry.chainage_available:
+            bits.append(f"Chainage measured along a {geometry.primary_length_km:,.0f} km "
+                        f"alignment.")
+        else:
+            bits.append("Alignment supplied but too fragmented for chainage; corridor "
+                        "length not reported.")
+
+    if stats:
+        bits.append(f"Routes: {stats.get('cache_hits', 0):,} from cache, "
+                    f"{stats.get('fetched', 0):,} fetched, "
+                    f"{stats.get('failed', 0):,} unresolved.")
+    st.caption(" ".join(bits))
+
+    # Proximity matching only sees stations whose position is known. Saying so
+    # is the difference between "these routes miss the corridor" and "we could
+    # not tell for some of them".
+    gazetteer = results.get("gazetteer") or {}
+    coverage = gazetteer.get("coverage")
+    if coverage is not None and coverage < 0.95:
+        st.warning(
+            f"Coordinates were available for {coverage:.0%} of the route stations "
+            f"encountered ({gazetteer.get('unlocatable', 0):,} could not be placed), so "
+            f"proximity matching is partial and corridor interaction may be understated. "
+            f"Station-code matching is unaffected."
+        )
+
+    if results.get("spatial_matches"):
+        with st.expander(f"{len(results['spatial_matches'])} stations matched by proximity"):
+            st.write(", ".join(results["spatial_matches"]))
+
+
+def render(results):
     master = results["master_od"]
     exceptions = results["exception_log"]
+    thresholds = results.get("thresholds", ())
+
+    _run_context(results)
+
+    # A defaulted tonnage column would otherwise present as a confident zero
+    # across every headline figure and chart on this page.
+    filled = (results.get("validation", {}).get("od", {}) or {}).get("filled_columns") or []
+    if schema.TONNAGE in filled:
+        st.warning(
+            "No tonnage column was recognised in the OD workbook, so every tonnage "
+            "figure below is zero by default rather than by measurement. Route counts, "
+            "corridor interactions and station movements are still valid. Check the "
+            "column name against the template if the workbook does carry tonnage."
+        )
 
     st.subheader("Headline")
-    _headline(master, exceptions, threshold)
+    _headline(master, exceptions, results["criterion"])
 
     st.subheader("Where the traffic sits")
     left, right = st.columns([3, 2])
     with left:
-        st.caption("Top DFC stations by tonnage, split by movement")
+        st.caption("Top corridor stations by tonnage, split by movement")
         _station_chart(results["station_summary"])
     with right:
-        st.caption("Divertible tonnage by threshold")
-        _threshold_chart(results)
+        st.caption("Divertible tonnage by station-count threshold")
+        _threshold_chart(results, thresholds)
+
+    if _corridor_profile(results["station_summary"]):
+        st.caption("Traffic along the corridor, by chainage")
 
     st.caption("Divertible tonnage by commodity")
     _commodity_chart(master)
 
     st.subheader("Detail")
-    tabs = st.tabs(
-        ["Master OD", "Station summary", "Route combinations",
-         f"Divertible (T{threshold})", "Exceptions"]
-    )
-    frames = [
-        master,
-        results["station_summary"],
-        results["route_combos"],
-        results[f"threshold_{threshold}_eligible"],
-        exceptions,
-    ]
-    for tab, frame in zip(tabs, frames):
+    frames = {
+        "Master OD": master,
+        "Station summary": results["station_summary"],
+        "Route combinations": results["route_combos"],
+        "Divertible": master[master[schema.ELIGIBLE] == "YES"],
+        "Exceptions": exceptions,
+    }
+    for tab, (label, frame) in zip(st.tabs(list(frames)), frames.items()):
         with tab:
             if frame is None or frame.empty:
                 st.info("Nothing to show here.")

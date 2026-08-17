@@ -1,0 +1,12 @@
+# This repo lives on a Windows drive and is edited from both Windows and WSL.
+# Without this, every file rewritten by a tool on one side shows up as a
+# whole-file diff on the other -- 362 changed lines that are only line endings.
+* text=auto eol=lf
+
+# Binary: never touch these.
+*.xlsx binary
+*.xls binary
+*.kmz binary
+*.db binary
+*.png binary
+*.pdf binary

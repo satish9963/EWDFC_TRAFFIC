@@ -1,14 +1,14 @@
 """Display helpers.
 
 Figures are shown in whatever unit the uploaded workbook uses. Nothing here
-converts or rescales a value — these only group digits and add a percent sign.
+converts or rescales a value -- these only group digits and add a percent sign.
 """
 import pandas as pd
 
 MISSING = "—"
 
 # Column-name fragments that should stay upper case when titleised.
-ACRONYMS = {"od": "OD", "dfc": "DFC", "ir": "IR"}
+ACRONYMS = {"od": "OD", "ir": "IR", "dfc": "DFC", "km": "km"}
 
 
 def format_number(value, decimals=0):
@@ -27,8 +27,15 @@ def format_percent(part, whole, decimals=1):
     return f"{100 * part / whole:.{decimals}f}%"
 
 
+def format_share(value, decimals=1):
+    """A stored fraction rendered as a percentage."""
+    if value is None or pd.isna(value):
+        return MISSING
+    return f"{100 * value:.{decimals}f}%"
+
+
 def _titleise(name):
-    if " " in name:  # already a display label, e.g. "DFC Station Code"
+    if " " in name:  # already a display label, e.g. "Corridor Station Code"
         return name
     words = [ACRONYMS.get(w.lower(), w.capitalize()) for w in name.split("_")]
     return " ".join(words)
