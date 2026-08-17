@@ -181,7 +181,27 @@ def _corridor_profile(station_summary):
     return True
 
 
-def _route_provenance(stats):
+def _unresolved_pairs(master_od):
+    """OD pairs this run could not get a route for, as a fetchable list.
+
+    Written with the header names the input validator already accepts, so the
+    downloaded file can be handed straight to tools/fetch_missing.py without
+    editing. A pair RBS answered "no route" for is left out -- that is an
+    answer, and refetching it changes nothing.
+    """
+    if master_od is None or master_od.empty:
+        return None
+    if schema.ROUTE_SOURCE not in master_od.columns:
+        return None
+    unresolved = master_od[master_od[schema.ROUTE_SOURCE].isin(["ERROR", "UNKNOWN"])]
+    if unresolved.empty:
+        return None
+    return (unresolved[[schema.FROM_CODE, schema.TO_CODE]]
+            .drop_duplicates()
+            .reset_index(drop=True))
+
+
+def _route_provenance(stats, master_od=None):
     """Where the routes came from.
 
     With tens of thousands of pairs already cached, a healthy run can make zero
@@ -203,10 +223,32 @@ def _route_provenance(stats):
             message += (" Fetching stopped early after repeated connection failures, "
                         "so some pairs were never attempted.")
         if "ConnectionError" in str(stats.get("last_error") or ""):
-            message += (" The TCP connection was refused — that is a network or "
-                        "source-IP problem, not a data problem. Run `python net_check` "
-                        "on this machine to tell which.")
+            message += (
+                " The TCP connection was refused, so this is a network or "
+                "source-IP problem, not a data problem. **RBS refuses "
+                "connections from datacentre IP ranges**, so on a hosted "
+                "deployment this is expected and cannot be fixed from here — "
+                "the routes have to be fetched on an ordinary connection and "
+                "shipped in the cache. On your own machine, run "
+                "`python net_check` to tell the causes apart."
+            )
         st.error(f"{message}\n\nLast error: {stats.get('last_error')}")
+
+        missing = _unresolved_pairs(master_od)
+        if missing is not None:
+            st.download_button(
+                f"Download the {len(missing):,} unresolved pair(s)",
+                data=missing.to_csv(index=False).encode("utf-8"),
+                file_name="unresolved_pairs.csv",
+                mime="text/csv",
+                help="Fetch them where the portal answers, then ship the cache.",
+            )
+            st.caption(
+                "Then, on a machine the portal answers: "
+                "`python tools/fetch_missing.py --od unresolved_pairs.csv` "
+                "and commit `cache.db`. This run's other figures are complete — "
+                "only these pairs are missing a route."
+            )
     elif stats.get("no_route"):
         st.warning(
             f"The portal returned no route for {stats['no_route']:,} pair(s). "
@@ -245,7 +287,7 @@ def _run_context(results):
         bits.append("No chainage available, so corridor length is not reported.")
     st.caption(" ".join(bits))
 
-    _route_provenance(stats)
+    _route_provenance(stats, results.get("master_od"))
 
     # Proximity matching only sees stations whose position is known. Saying so
     # is the difference between "these routes miss the corridor" and "we could
