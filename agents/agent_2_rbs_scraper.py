@@ -40,7 +40,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-from config import RBS_URL
+from config import RBS_PROXY, RBS_URL
 from core.cache import RBSCache
 from core.schema import normalise_station_code
 
@@ -85,6 +85,41 @@ _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 norm_code = normalise_station_code
 
 
+def _code_from_cell(cell):
+    """The station code out of a route cell, ignoring what is nested in it.
+
+    The code cell is not just a code. A station with sidings carries a link
+    after it, so the cell reads `GDYA Sidings: [MPBG, THSG]`, and joining the
+    cell's strings with a space produced exactly that -- which then failed the
+    code pattern, and the station was skipped without a word. Every station
+    with sidings vanished from every route parsed this way: 8 of 24 survived on
+    BBTR -> BIA, the destination among the casualties.
+
+    Joining with a newline instead keeps the link text on its own line, so the
+    first line is the code. The pattern check stays as strict as it was -- it
+    was never the problem, and it is what rejects the stray one-letter cells.
+    """
+    return cell.get_text("\n", strip=True).split("\n")[0].strip().upper()
+
+
+def is_usable_route(source, destination, route_sequence):
+    """Is this parse a route, or the portal echoing the origin back?
+
+    RBS answers an unroutable pair -- typically a destination code that does not
+    exist -- with a page listing the origin alone. `_parse` reads one code off
+    it and 0 km, which is indistinguishable from a real result unless the length
+    is checked. Cached as SUCCESS it becomes a 0 km "route" that later reads as
+    a real flow touching no corridor station, so the pair is never retried and
+    never appears in the unresolved audit either.
+
+    A single station is only ever legitimate when origin and destination are the
+    same place.
+    """
+    if not route_sequence:
+        return False
+    return len(route_sequence) >= 2 or norm_code(source) == norm_code(destination)
+
+
 class RBSError(Exception):
     """Transport/parse failure -- distinct from 'RBS has no route for this pair'."""
 
@@ -107,12 +142,14 @@ class RateLimiter:
 
 class RBSScraper:
     def __init__(self, max_age_days=None, workers=MAX_WORKERS, url=RBS_URL,
-                 strict=False, verify_tls=None):
+                 strict=False, verify_tls=None, proxy=None):
         """
         max_age_days expires cached routes; None serves any cached SUCCESS.
         strict=True re-raises RBSError instead of caching ERROR. Use it in a
         smoke test so a dead portal fails loudly rather than quietly producing
         a spreadsheet full of blank distances.
+        proxy overrides config.RBS_PROXY for this scraper only; it decides
+        where requests leave from, never how fast they are sent.
         """
         self.cache = RBSCache()
         self.max_age_days = max_age_days
@@ -120,6 +157,7 @@ class RBSScraper:
         self.url = url
         self.strict = strict
         self.verify_tls = VERIFY_TLS if verify_tls is None else verify_tls
+        self.proxy = RBS_PROXY if proxy is None else proxy
 
         self._local = threading.local()
         self._limiter = RateLimiter(MIN_INTERVAL)
@@ -141,12 +179,14 @@ class RBSScraper:
             session = requests.Session()
             session.verify = self.verify_tls
             # A dead proxy in the environment produces a bare Errno 111. Set
-            # RBS_NO_PROXY=1 to bypass it, or RBS_PROXY to point at a live one.
+            # RBS_NO_PROXY=1 to bypass it, or RBS_PROXY / RAIL_RBS_PROXY to
+            # point at a live one -- both spellings resolve through config, so
+            # there is one definition rather than a second name that silently
+            # does nothing.
             if os.environ.get("RBS_NO_PROXY"):
                 session.trust_env = False
-            elif os.environ.get("RBS_PROXY"):
-                session.proxies = {"http": os.environ["RBS_PROXY"],
-                                   "https": os.environ["RBS_PROXY"]}
+            elif self.proxy:
+                session.proxies = {"http": self.proxy, "https": self.proxy}
             session.headers.update({
                 "User-Agent": USER_AGENT,
                 "Referer": RBS_FORM_PAGE,
@@ -206,7 +246,7 @@ class RBSScraper:
             if len(cols) <= max(code_i, dist_i):
                 continue
 
-            code = cols[code_i].get_text(" ", strip=True).split("\n")[0].strip().upper()
+            code = _code_from_cell(cols[code_i])
             if not _CODE_RE.match(code):
                 continue
             codes.append(code)
@@ -262,6 +302,86 @@ class RBSScraper:
 
         return 0.0, [], []
 
+    @classmethod
+    def parse_detailed(cls, html):
+        """Per-station rows: [{code, name, cumulative_km}, ...].
+
+        The pipeline only needs codes and a total, so _parse throws the names
+        away. A human reading a route wants them, so this keeps them. Additive
+        on purpose -- _parse stays exactly as it is, because it is the path the
+        38k-row cache was built with.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        stations = []
+        for row in soup.find_all("tr"):
+            cols = row.find_all("td")
+            if len(cols) <= 3:
+                continue
+            code = _code_from_cell(cols[1])
+            if not _CODE_RE.match(code):
+                continue
+            name = cols[2].get_text(" ", strip=True)
+            cell = cols[3].get_text(" ", strip=True).replace(",", "")
+            match = _NUM_RE.search(cell)
+            stations.append({
+                "code": code,
+                "name": name,
+                "cumulative_km": float(match.group()) if match else None,
+            })
+        return stations
+
+    def lookup(self, source, destination):
+        """One OD pair, with everything a human would want to see.
+
+        Cache-first, so repeating a query costs nothing. Returns a dict rather
+        than printing, so callers can tabulate or export.
+        """
+        source, destination = norm_code(source), norm_code(destination)
+        cached = self.cache.get_route(source, destination, max_age_days=self.max_age_days)
+
+        if cached and cached["status"] == "SUCCESS":
+            self._bump("cache_hits")
+            return {
+                "source": source, "destination": destination,
+                "distance_km": cached["distance"],
+                "route": cached["route_sequence"],
+                "junctions": cached["junctions"],
+                "stations": None,          # names are not stored in the cache
+                "origin": "cache",
+                "fetched_at": cached.get("fetched_at"),
+                "error": None,
+            }
+
+        try:
+            html, _status = self._post(source, destination)
+        except RBSError as exc:
+            self._bump("errors")
+            self.last_error = str(exc)
+            return {"source": source, "destination": destination, "distance_km": None,
+                    "route": [], "junctions": [], "stations": None,
+                    "origin": "error", "fetched_at": None, "error": str(exc)}
+
+        distance, codes, junctions = self._parse(html)
+        detailed = self.parse_detailed(html)
+        if not is_usable_route(source, destination, codes):
+            self._bump("no_route")
+            self.cache.set_route(source, destination, 0, [], [], status="FAILED")
+            reason = ("RBS returned no route for this pair" if not codes else
+                      f"RBS returned only {codes[0]} -- check that {destination} "
+                      "is a valid station code")
+            return {"source": source, "destination": destination, "distance_km": None,
+                    "route": [], "junctions": [], "stations": [],
+                    "origin": "no_route", "fetched_at": None, "error": reason}
+
+        self._bump("fetched")
+        self.cache.set_route(source, destination, distance, codes, junctions,
+                             status="SUCCESS")
+        return {
+            "source": source, "destination": destination, "distance_km": distance,
+            "route": codes, "junctions": junctions, "stations": detailed,
+            "origin": "fetched", "fetched_at": "just now", "error": None,
+        }
+
     # -- single -----------------------------------------------------------
 
     def _bump(self, key):
@@ -289,7 +409,11 @@ class RBSScraper:
                 raise
             return source, destination, None, [], [], None
 
-        if not route_sequence:
+        # A single station returned for two different codes is the portal
+        # echoing the origin back, not a route. Recorded as NO_ROUTE for the
+        # same reason an empty parse is: a 0 km SUCCESS row would be believed
+        # by everything downstream and never looked at again.
+        if not is_usable_route(source, destination, route_sequence):
             self._bump("no_route")
             self._mark(source, destination, "NO_ROUTE")
             self.cache.set_route(source, destination, 0, [], [], status="FAILED",

@@ -62,6 +62,19 @@ GAZETTEER_PATH = Path(_env("RAIL_GAZETTEER", None, BASE_DIR / "data" / "stations
 
 RBS_URL = "https://rbs.indianrail.gov.in/ShortPath/ShortPathServlet"
 
+# Optional egress proxy for portal calls, e.g. "http://user:pass@host:8080".
+#
+# RBS refuses TCP connections from datacentre IP ranges, so a hosted run dies
+# with `Errno 111 Connection refused` before any HTTP request is made. Pointing
+# this at a proxy on an ordinary connection is what lets a hosted deployment
+# reach the portal at all. Unset means connect directly, which is right on a
+# normal machine.
+#
+# This changes where requests leave from. It does not change how fast they are
+# sent: the scraper's rate limit still applies, and should. A proxy is how a
+# blocked deployment reaches the portal, not a way to ask more of it.
+RBS_PROXY = _env("RAIL_RBS_PROXY", "RBS_PROXY", None) or None
+
 APP_TITLE = "Rail Corridor Traffic Assessment"
 APP_ICON = "🚂"
 

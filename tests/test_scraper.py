@@ -140,6 +140,109 @@ def test_empty_response_parses_to_nothing_rather_than_raising():
     assert RBSScraper._parse("<html><body>No route found</body></html>") == (0.0, [], [])
 
 
+# The real servlet markup for a station that has sidings: the code cell holds
+# the code *and* a link listing them. Taken from a live BBTR -> BIA response.
+SIDINGS_HTML = """
+<TR class=" serving-stn ">
+  <TD width="29"><A href="javascript:getInterStation(1,'NGP','CR')">+</A></TD>
+  <TD align="center">
+    GDYA
+    <a href="javascript:viewServingStation('[MPBG, THSG]')">Sidings: [MPBG, THSG]</a>
+  </TD>
+  <TD align="center"><b>  Ghoradongri</b></TD>
+  <TD align="center">11.86</TD>
+</TR>
+<TR>
+  <TD width="29"></TD><TD align="center">BZU</TD>
+  <TD align="center"><b>Betul</b></TD><TD align="center">24.5</TD>
+</TR>
+<TR>
+  <TD width="29"></TD><TD align="center">G</TD>
+  <TD align="center"><b>stray one-letter cell</b></TD><TD align="center">30</TD>
+</TR>
+<TR class=" serving-stn ">
+  <TD width="29"><A href="javascript:getInterStation(3,'NGP','CR')">+</A></TD>
+  <TD align="center">
+    BIA
+    <a href="javascript:viewServingStation('[BSPC, JCGA]')">Sidings: [BSPC, JCGA]</a>
+  </TD>
+  <TD align="center"><b>Bhilai</b></TD>
+  <TD align="center">118.6</TD>
+</TR>
+"""
+
+
+def test_a_station_with_sidings_is_not_dropped():
+    """The bug this pins cost 16 of 24 stations on a real route.
+
+    A station with sidings carries a link inside the code cell, so joining the
+    cell's strings with a space produced `GDYA Sidings: [MPBG, THSG]`, which
+    failed the code pattern -- and the station was skipped in silence. The
+    destination was among the stations lost, so a route could be recorded as
+    never reaching where it was going.
+    """
+    _distance, codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert "GDYA" in codes
+    assert "BIA" in codes, "the destination itself was being dropped"
+
+
+def test_the_strict_code_rule_still_rejects_junk_cells():
+    """Fixing the extraction must not turn into accepting anything."""
+    _distance, codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert codes == ["GDYA", "BZU", "BIA"]   # the one-letter cell stays out
+
+
+def test_distance_recovers_when_the_dropped_rows_come_back():
+    """Distance is the max over kept rows, so dropped rows shortened routes.
+
+    The destination carries sidings here, exactly as BIA does on the real
+    response, so losing it under-reads the route's total length.
+    """
+    distance, _codes, _junctions = RBSScraper._parse(SIDINGS_HTML)
+    assert distance == pytest.approx(118.6)  # not 24.5 from a truncated read
+
+
+def test_parse_detailed_reads_the_same_sidings_cell():
+    stations = RBSScraper.parse_detailed(SIDINGS_HTML)
+    assert [s["code"] for s in stations] == ["GDYA", "BZU", "BIA"]
+    assert stations[0]["name"] == "Ghoradongri"
+
+
+def test_parse_detailed_keeps_the_names_parse_throws_away():
+    """The pipeline needs codes; a human reading a route needs names too."""
+    stations = RBSScraper.parse_detailed(POSITIONAL_HTML)
+    assert [s["code"] for s in stations] == ["BSL", "JL", "NGP"]
+    assert [s["name"] for s in stations] == ["Bhusaval Jn", "Jalgaon", "Nagpur"]
+    assert stations[-1]["cumulative_km"] == pytest.approx(1234.5)
+
+
+def test_parse_detailed_agrees_with_parse_on_the_codes():
+    """Two parsers reading one page must not disagree about which stations."""
+    _distance, codes, _junctions = RBSScraper._parse(POSITIONAL_HTML)
+    assert [s["code"] for s in RBSScraper.parse_detailed(POSITIONAL_HTML)] == codes
+
+
+# --- degenerate routes ----------------------------------------------------
+
+@pytest.mark.parametrize("source,destination,route,usable", [
+    ("DURG", "RJN", ["DURG"], False),       # portal echoed the origin back
+    ("DURG", "RJN", [], False),             # nothing at all
+    ("DURG", "BPL", ["DURG", "BPL"], True),
+    ("DURG", "DURG", ["DURG"], True),       # same place: one station is correct
+    ("durg", " DURG ", ["DURG"], True),     # ...and normalisation applies first
+])
+def test_single_station_answer_is_only_a_route_to_itself(source, destination,
+                                                         route, usable):
+    """A one-station 0 km 'route' cached as SUCCESS is worse than a cache miss.
+
+    It is never retried, never reaches the unresolved audit, and downstream it
+    reads as a real flow that happens to touch no corridor station. RBS returns
+    this shape for a destination code that does not exist.
+    """
+    from agents.agent_2_rbs_scraper import is_usable_route
+    assert is_usable_route(source, destination, route) is usable
+
+
 # --- failure classification ----------------------------------------------
 
 def test_circuit_opens_after_repeated_connection_errors(monkeypatch, tmp_path):
@@ -176,3 +279,31 @@ def test_tls_verification_is_on_by_default():
     """These distances reach client deliverables; do not ship verify=False."""
     from agents import agent_2_rbs_scraper as module
     assert module.VERIFY_TLS is True
+
+
+# --- egress ---------------------------------------------------------------
+
+def test_proxy_defaults_to_the_configured_one(monkeypatch):
+    """RBS_PROXY and RAIL_RBS_PROXY resolve through config, so there is one
+    definition rather than a second name that silently does nothing."""
+    from agents import agent_2_rbs_scraper as module
+
+    monkeypatch.setattr(module, "RBS_PROXY", "http://configured:8080")
+    monkeypatch.setattr(module, "RBSCache", lambda *a, **k: object())
+
+    assert RBSScraper().proxy == "http://configured:8080"
+    # An explicit argument wins over the configured value...
+    assert RBSScraper(proxy="http://explicit:3128").proxy == "http://explicit:3128"
+    # ...including an explicit "no proxy", which must not fall back to config.
+    assert RBSScraper(proxy="").proxy == ""
+
+
+def test_a_proxy_does_not_change_the_request_rate():
+    """A proxy decides where requests leave from, not how many are sent.
+
+    Removing the limiter would be asking the portal for more, which is a
+    different thing from making a blocked deployment work at all.
+    """
+    from agents import agent_2_rbs_scraper as module
+    assert module.MIN_INTERVAL >= 0.30
+    assert module.MAX_WORKERS <= 6

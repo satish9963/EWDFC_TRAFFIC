@@ -128,6 +128,93 @@ python tools/refresh_cache.py --db cache.db --workers 12 --drift-report drift.cs
 Run it against a cache on local disk rather than a Windows-mounted path; SQLite locking
 over DrvFs is slow and unreliable. The run is resumable and reports which routes changed.
 
+To repair rows that a past parser got wrong:
+
+```bash
+python tools/repair_degenerate_routes.py --db cache.db --dry-run
+python tools/repair_degenerate_routes.py --db cache.db --report repair.csv
+```
+
+It re-fetches every `SUCCESS` row the current parser would never have written — one with
+fewer than two stations between two different places, or one with a token in its sequence
+that is not a station code — and re-decides each on the evidence. Rows the portal errors on
+are left untouched, and the database is backed up first.
+
+**There is one route parser**, `RBSScraper._parse`. There were briefly two, and they
+disagreed: one dropped every station that had sidings, the other admitted table headers as
+stations. If you find yourself writing a second one, that is the bug.
+
+## Looking up routes by hand
+
+The RBS web form answers one OD pair at a time and expects you to already know the station
+code. `tools/rbs_lookup.py` does both halves from the command line, cache-first, so a pair
+already in `cache.db` costs nothing and only genuinely new pairs reach the portal.
+
+```bash
+python tools/rbs_lookup.py --station bhusaval     # find a code, no network needed
+python tools/rbs_lookup.py NGP BPL                # one pair, with station names and chainage
+python tools/rbs_lookup.py --pairs "NGP-BPL, HWH-NDLS"
+python tools/rbs_lookup.py --from-excel od.xlsx --out routes.xlsx
+```
+
+`--from-excel` accepts any workbook the app accepts, header aliases included, and looks up
+each distinct pair once. `--refresh` ignores cached rows and refetches.
+
+Two limits worth knowing:
+
+- **Not every code is in the gazetteer.** `--station` searches `data/stations.csv`, which
+  carries codes for 7,021 of its 12,057 stations. `NGP` is a valid IR code but has no row,
+  so the search says so rather than showing name matches as if they were the answer.
+- **A single-station answer is not a route.** RBS replies to an unroutable pair — usually a
+  destination code that does not exist — with a page listing the origin alone. That is
+  reported as unavailable, and cached as `FAILED` rather than as a 0 km success.
+
+## New datasets: fetching the routes the cache does not have
+
+A new OD dataset brings pairs the cache has never seen. They are fetched automatically
+during a run — but **not from a hosted deployment**. RBS refuses TCP connections from
+datacentre IP ranges, so a Streamlit Cloud run fails with `Errno 111 Connection refused`
+before any HTTP request is made, and the circuit breaker stops it after five refusals.
+That is a block on RBS's side; no change here removes it.
+
+So fetch on a machine the portal answers, then ship the cache:
+
+```bash
+python tools/fetch_missing.py --od "Inputs/new-od.xlsx" --dry-run   # coverage only
+python tools/fetch_missing.py --od "Inputs/new-od.xlsx" --report fetched.csv
+git add cache.db && git commit -m "Cache routes for <dataset>"
+```
+
+It reads whatever the app reads — same header aliases, same two-row header promotion —
+plus `.csv` and `.parquet`, which matter because a large `.xlsx` costs minutes just to
+parse. Only genuinely missing pairs are fetched: rows already cached are skipped, `ERROR`
+rows are retried (the portal was unreachable, which says nothing about the pair), and
+`FAILED` rows are left alone unless you pass `--retry-failed`.
+
+Measured on this portal: **~27 pairs/s**, so 4,000 missing pairs take about 2.5 minutes.
+The run is resumable — fetched pairs land in the cache, so re-running after an
+interruption continues where it stopped.
+
+| Speed | Where |
+|---|---|
+| ~27/s | `fetch_missing.py` / `refresh_cache.py` — bulk tools, run deliberately |
+| ~3/s | the app's own scraper — `MIN_INTERVAL = 0.30s`, global across all workers |
+
+The app's limit is global, so raising `MAX_WORKERS` does not make it faster.
+
+### Proxy
+
+`RBS_PROXY` (or `RAIL_RBS_PROXY`) routes portal calls through an egress you supply — this
+is what lets a hosted deployment reach RBS at all:
+
+```bash
+export RBS_PROXY="http://user:pass@host:8080"
+```
+
+`RBS_NO_PROXY=1` ignores proxy environment variables entirely, which is the fix when a
+dead proxy in the environment is itself producing `Errno 111`. A proxy changes where
+requests leave from; it does not change how fast they are sent, and the rate limit stays.
+
 ## Station gazetteer
 
 `data/stations.csv` maps station codes **and names** to coordinates, which is what makes

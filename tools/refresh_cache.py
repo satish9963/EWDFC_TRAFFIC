@@ -23,9 +23,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
-from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from agents.agent_2_rbs_scraper import RBSScraper, is_usable_route  # noqa: E402
+from config import RBS_PROXY  # noqa: E402
 
 RBS_URL = "https://rbs.indianrail.gov.in/ShortPath/ShortPathServlet"
 
@@ -46,6 +48,10 @@ def _session():
         s = requests.Session()
         s.verify = VERIFY_TLS
         s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; corridor-assessment/1.0)"})
+        # Same egress rule as the scraper, so a proxied deployment does not
+        # have one path that works and one that is refused.
+        if RBS_PROXY:
+            s.proxies = {"http": RBS_PROXY, "https": RBS_PROXY}
         _local.session = s
     return _local.session
 
@@ -53,20 +59,17 @@ def _session():
 def parse_route(html):
     """Pull the station sequence and total distance out of the RBS response.
 
-    Kept identical to the scraper in agents/ so a refreshed row is exactly what
-    a live lookup would have produced.
+    This used to be a second implementation, described as "kept identical to
+    the scraper in agents/". It was not identical, and the two disagreed badly:
+    this one accepted any cell of 8 characters or fewer, so table headers and
+    stray one-letter cells entered route sequences as if they were stations
+    (`Source`, `G`, `R` -- 5,283 cached rows carried one). Meanwhile the
+    scraper's own parser was dropping every station that had sidings.
+
+    There is now one parser. Both callers get whatever RBSScraper._parse does,
+    which is the one under test.
     """
-    soup = BeautifulSoup(html, "html.parser")
-    sequence, distance = [], 0.0
-    for row in soup.find_all("tr"):
-        cols = row.find_all("td")
-        if len(cols) > 3:
-            code = cols[1].text.strip().split("\n")[0].strip()
-            if code and len(code) <= 8 and " " not in code:
-                sequence.append(code)
-                text = cols[3].text.strip()
-                if text.replace(".", "", 1).isdigit():
-                    distance = float(text)
+    distance, sequence, _junctions = RBSScraper._parse(html)
     return sequence, distance
 
 
@@ -83,8 +86,11 @@ def fetch(source, destination, retries=3):
             if r.status_code != 200:
                 raise requests.HTTPError(f"HTTP {r.status_code}")
             sequence, distance = parse_route(r.text)
-            if not sequence:
-                # A real "no path" answer, not a transport failure.
+            if not is_usable_route(source, destination, sequence):
+                # A real "no path" answer, not a transport failure. Covers both
+                # an empty parse and the portal's other way of saying no: a page
+                # listing the origin alone, which parses to one station and 0 km
+                # and would otherwise be stored as a successful zero-length route.
                 return {"status": "FAILED", "distance": 0.0, "route_sequence": [],
                         "junctions": [], "http_status": r.status_code}
             return {
