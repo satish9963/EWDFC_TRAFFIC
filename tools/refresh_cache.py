@@ -27,6 +27,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from agents.agent_2_rbs_scraper import RBSScraper, is_usable_route  # noqa: E402
+from config import RBS_PROXY  # noqa: E402
 
 RBS_URL = "https://rbs.indianrail.gov.in/ShortPath/ShortPathServlet"
 
@@ -47,6 +48,10 @@ def _session():
         s = requests.Session()
         s.verify = VERIFY_TLS
         s.headers.update({"User-Agent": "Mozilla/5.0 (compatible; corridor-assessment/1.0)"})
+        # Same egress rule as the scraper, so a proxied deployment does not
+        # have one path that works and one that is refused.
+        if RBS_PROXY:
+            s.proxies = {"http": RBS_PROXY, "https": RBS_PROXY}
         _local.session = s
     return _local.session
 

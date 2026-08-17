@@ -279,3 +279,31 @@ def test_tls_verification_is_on_by_default():
     """These distances reach client deliverables; do not ship verify=False."""
     from agents import agent_2_rbs_scraper as module
     assert module.VERIFY_TLS is True
+
+
+# --- egress ---------------------------------------------------------------
+
+def test_proxy_defaults_to_the_configured_one(monkeypatch):
+    """RBS_PROXY and RAIL_RBS_PROXY resolve through config, so there is one
+    definition rather than a second name that silently does nothing."""
+    from agents import agent_2_rbs_scraper as module
+
+    monkeypatch.setattr(module, "RBS_PROXY", "http://configured:8080")
+    monkeypatch.setattr(module, "RBSCache", lambda *a, **k: object())
+
+    assert RBSScraper().proxy == "http://configured:8080"
+    # An explicit argument wins over the configured value...
+    assert RBSScraper(proxy="http://explicit:3128").proxy == "http://explicit:3128"
+    # ...including an explicit "no proxy", which must not fall back to config.
+    assert RBSScraper(proxy="").proxy == ""
+
+
+def test_a_proxy_does_not_change_the_request_rate():
+    """A proxy decides where requests leave from, not how many are sent.
+
+    Removing the limiter would be asking the portal for more, which is a
+    different thing from making a blocked deployment work at all.
+    """
+    from agents import agent_2_rbs_scraper as module
+    assert module.MIN_INTERVAL >= 0.30
+    assert module.MAX_WORKERS <= 6

@@ -40,7 +40,7 @@ import time
 import requests
 from bs4 import BeautifulSoup
 
-from config import RBS_URL
+from config import RBS_PROXY, RBS_URL
 from core.cache import RBSCache
 from core.schema import normalise_station_code
 
@@ -142,12 +142,14 @@ class RateLimiter:
 
 class RBSScraper:
     def __init__(self, max_age_days=None, workers=MAX_WORKERS, url=RBS_URL,
-                 strict=False, verify_tls=None):
+                 strict=False, verify_tls=None, proxy=None):
         """
         max_age_days expires cached routes; None serves any cached SUCCESS.
         strict=True re-raises RBSError instead of caching ERROR. Use it in a
         smoke test so a dead portal fails loudly rather than quietly producing
         a spreadsheet full of blank distances.
+        proxy overrides config.RBS_PROXY for this scraper only; it decides
+        where requests leave from, never how fast they are sent.
         """
         self.cache = RBSCache()
         self.max_age_days = max_age_days
@@ -155,6 +157,7 @@ class RBSScraper:
         self.url = url
         self.strict = strict
         self.verify_tls = VERIFY_TLS if verify_tls is None else verify_tls
+        self.proxy = RBS_PROXY if proxy is None else proxy
 
         self._local = threading.local()
         self._limiter = RateLimiter(MIN_INTERVAL)
@@ -176,12 +179,14 @@ class RBSScraper:
             session = requests.Session()
             session.verify = self.verify_tls
             # A dead proxy in the environment produces a bare Errno 111. Set
-            # RBS_NO_PROXY=1 to bypass it, or RBS_PROXY to point at a live one.
+            # RBS_NO_PROXY=1 to bypass it, or RBS_PROXY / RAIL_RBS_PROXY to
+            # point at a live one -- both spellings resolve through config, so
+            # there is one definition rather than a second name that silently
+            # does nothing.
             if os.environ.get("RBS_NO_PROXY"):
                 session.trust_env = False
-            elif os.environ.get("RBS_PROXY"):
-                session.proxies = {"http": os.environ["RBS_PROXY"],
-                                   "https": os.environ["RBS_PROXY"]}
+            elif self.proxy:
+                session.proxies = {"http": self.proxy, "https": self.proxy}
             session.headers.update({
                 "User-Agent": USER_AGENT,
                 "Referer": RBS_FORM_PAGE,
