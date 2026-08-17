@@ -85,6 +85,24 @@ _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 norm_code = normalise_station_code
 
 
+def is_usable_route(source, destination, route_sequence):
+    """Is this parse a route, or the portal echoing the origin back?
+
+    RBS answers an unroutable pair -- typically a destination code that does not
+    exist -- with a page listing the origin alone. `_parse` reads one code off
+    it and 0 km, which is indistinguishable from a real result unless the length
+    is checked. Cached as SUCCESS it becomes a 0 km "route" that later reads as
+    a real flow touching no corridor station, so the pair is never retried and
+    never appears in the unresolved audit either.
+
+    A single station is only ever legitimate when origin and destination are the
+    same place.
+    """
+    if not route_sequence:
+        return False
+    return len(route_sequence) >= 2 or norm_code(source) == norm_code(destination)
+
+
 class RBSError(Exception):
     """Transport/parse failure -- distinct from 'RBS has no route for this pair'."""
 
@@ -261,6 +279,86 @@ class RBSScraper:
                 return distance, codes, junctions
 
         return 0.0, [], []
+
+    @classmethod
+    def parse_detailed(cls, html):
+        """Per-station rows: [{code, name, cumulative_km}, ...].
+
+        The pipeline only needs codes and a total, so _parse throws the names
+        away. A human reading a route wants them, so this keeps them. Additive
+        on purpose -- _parse stays exactly as it is, because it is the path the
+        38k-row cache was built with.
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        stations = []
+        for row in soup.find_all("tr"):
+            cols = row.find_all("td")
+            if len(cols) <= 3:
+                continue
+            code = cols[1].get_text(" ", strip=True).split("\n")[0].strip().upper()
+            if not _CODE_RE.match(code):
+                continue
+            name = cols[2].get_text(" ", strip=True)
+            cell = cols[3].get_text(" ", strip=True).replace(",", "")
+            match = _NUM_RE.search(cell)
+            stations.append({
+                "code": code,
+                "name": name,
+                "cumulative_km": float(match.group()) if match else None,
+            })
+        return stations
+
+    def lookup(self, source, destination):
+        """One OD pair, with everything a human would want to see.
+
+        Cache-first, so repeating a query costs nothing. Returns a dict rather
+        than printing, so callers can tabulate or export.
+        """
+        source, destination = norm_code(source), norm_code(destination)
+        cached = self.cache.get_route(source, destination, max_age_days=self.max_age_days)
+
+        if cached and cached["status"] == "SUCCESS":
+            self._bump("cache_hits")
+            return {
+                "source": source, "destination": destination,
+                "distance_km": cached["distance"],
+                "route": cached["route_sequence"],
+                "junctions": cached["junctions"],
+                "stations": None,          # names are not stored in the cache
+                "origin": "cache",
+                "fetched_at": cached.get("fetched_at"),
+                "error": None,
+            }
+
+        try:
+            html, _status = self._post(source, destination)
+        except RBSError as exc:
+            self._bump("errors")
+            self.last_error = str(exc)
+            return {"source": source, "destination": destination, "distance_km": None,
+                    "route": [], "junctions": [], "stations": None,
+                    "origin": "error", "fetched_at": None, "error": str(exc)}
+
+        distance, codes, junctions = self._parse(html)
+        detailed = self.parse_detailed(html)
+        if not is_usable_route(source, destination, codes):
+            self._bump("no_route")
+            self.cache.set_route(source, destination, 0, [], [], status="FAILED")
+            reason = ("RBS returned no route for this pair" if not codes else
+                      f"RBS returned only {codes[0]} -- check that {destination} "
+                      "is a valid station code")
+            return {"source": source, "destination": destination, "distance_km": None,
+                    "route": [], "junctions": [], "stations": [],
+                    "origin": "no_route", "fetched_at": None, "error": reason}
+
+        self._bump("fetched")
+        self.cache.set_route(source, destination, distance, codes, junctions,
+                             status="SUCCESS")
+        return {
+            "source": source, "destination": destination, "distance_km": distance,
+            "route": codes, "junctions": junctions, "stations": detailed,
+            "origin": "fetched", "fetched_at": "just now", "error": None,
+        }
 
     # -- single -----------------------------------------------------------
 

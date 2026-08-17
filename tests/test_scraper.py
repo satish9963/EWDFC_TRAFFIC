@@ -140,6 +140,41 @@ def test_empty_response_parses_to_nothing_rather_than_raising():
     assert RBSScraper._parse("<html><body>No route found</body></html>") == (0.0, [], [])
 
 
+def test_parse_detailed_keeps_the_names_parse_throws_away():
+    """The pipeline needs codes; a human reading a route needs names too."""
+    stations = RBSScraper.parse_detailed(POSITIONAL_HTML)
+    assert [s["code"] for s in stations] == ["BSL", "JL", "NGP"]
+    assert [s["name"] for s in stations] == ["Bhusaval Jn", "Jalgaon", "Nagpur"]
+    assert stations[-1]["cumulative_km"] == pytest.approx(1234.5)
+
+
+def test_parse_detailed_agrees_with_parse_on_the_codes():
+    """Two parsers reading one page must not disagree about which stations."""
+    _distance, codes, _junctions = RBSScraper._parse(POSITIONAL_HTML)
+    assert [s["code"] for s in RBSScraper.parse_detailed(POSITIONAL_HTML)] == codes
+
+
+# --- degenerate routes ----------------------------------------------------
+
+@pytest.mark.parametrize("source,destination,route,usable", [
+    ("DURG", "RJN", ["DURG"], False),       # portal echoed the origin back
+    ("DURG", "RJN", [], False),             # nothing at all
+    ("DURG", "BPL", ["DURG", "BPL"], True),
+    ("DURG", "DURG", ["DURG"], True),       # same place: one station is correct
+    ("durg", " DURG ", ["DURG"], True),     # ...and normalisation applies first
+])
+def test_single_station_answer_is_only_a_route_to_itself(source, destination,
+                                                         route, usable):
+    """A one-station 0 km 'route' cached as SUCCESS is worse than a cache miss.
+
+    It is never retried, never reaches the unresolved audit, and downstream it
+    reads as a real flow that happens to touch no corridor station. RBS returns
+    this shape for a destination code that does not exist.
+    """
+    from agents.agent_2_rbs_scraper import is_usable_route
+    assert is_usable_route(source, destination, route) is usable
+
+
 # --- failure classification ----------------------------------------------
 
 def test_circuit_opens_after_repeated_connection_errors(monkeypatch, tmp_path):

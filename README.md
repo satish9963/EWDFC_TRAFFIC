@@ -128,6 +128,31 @@ python tools/refresh_cache.py --db cache.db --workers 12 --drift-report drift.cs
 Run it against a cache on local disk rather than a Windows-mounted path; SQLite locking
 over DrvFs is slow and unreliable. The run is resumable and reports which routes changed.
 
+## Looking up routes by hand
+
+The RBS web form answers one OD pair at a time and expects you to already know the station
+code. `tools/rbs_lookup.py` does both halves from the command line, cache-first, so a pair
+already in `cache.db` costs nothing and only genuinely new pairs reach the portal.
+
+```bash
+python tools/rbs_lookup.py --station bhusaval     # find a code, no network needed
+python tools/rbs_lookup.py NGP BPL                # one pair, with station names and chainage
+python tools/rbs_lookup.py --pairs "NGP-BPL, HWH-NDLS"
+python tools/rbs_lookup.py --from-excel od.xlsx --out routes.xlsx
+```
+
+`--from-excel` accepts any workbook the app accepts, header aliases included, and looks up
+each distinct pair once. `--refresh` ignores cached rows and refetches.
+
+Two limits worth knowing:
+
+- **Not every code is in the gazetteer.** `--station` searches `data/stations.csv`, which
+  carries codes for 7,021 of its 12,057 stations. `NGP` is a valid IR code but has no row,
+  so the search says so rather than showing name matches as if they were the answer.
+- **A single-station answer is not a route.** RBS replies to an unroutable pair — usually a
+  destination code that does not exist — with a page listing the origin alone. That is
+  reported as unavailable, and cached as `FAILED` rather than as a 0 km success.
+
 ## Station gazetteer
 
 `data/stations.csv` maps station codes **and names** to coordinates, which is what makes
