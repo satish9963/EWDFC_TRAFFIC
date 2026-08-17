@@ -114,3 +114,56 @@ def test_phantom_empty_columns_are_dropped():
     for i in range(50):
         df[f"Unnamed: {i + 2}"] = None
     assert len(drop_empty_columns(df).columns) == 2
+
+
+# --- duplicate OD rows carry quantity -------------------------------------
+
+def test_identical_od_rows_are_summed_not_dropped():
+    """Two identical rows are two movements, not one recorded twice.
+
+    Dropping the second deleted a real consignment silently. On a 555-row
+    client dataset that removed 250 rakes and 84,410 tonnes -- 24.4%.
+    """
+    row = {"From Station Code": "NGN", "To Station Code": "PCPK",
+           "Commodity": "CONT", "Annual Tonnage": 207.0,
+           "No. of Rakes / Wagon Units": 1}
+    clean, report = InputValidator().validate_od_data(pd.DataFrame([row, row, row]))
+
+    assert len(clean) == 1                       # collapsed to one row...
+    assert clean[schema.TONNAGE].sum() == 621.0  # ...but all the tonnage kept
+    assert clean[schema.UNITS].sum() == 3
+    assert report.merged_duplicates == 2
+
+
+def test_rows_differing_in_any_field_stay_separate():
+    """Only exactly identical rows merge; nothing is inferred."""
+    frame = pd.DataFrame([
+        {"From Station Code": "NGN", "To Station Code": "PCPK",
+         "Commodity": "CONT", "Annual Tonnage": 207.0,
+         "No. of Rakes / Wagon Units": 1},
+        {"From Station Code": "NGN", "To Station Code": "PCPK",
+         "Commodity": "CONT", "Annual Tonnage": 150.0,
+         "No. of Rakes / Wagon Units": 1},
+    ])
+    clean, report = InputValidator().validate_od_data(frame)
+
+    assert len(clean) == 2
+    assert report.merged_duplicates == 0
+    assert clean[schema.TONNAGE].sum() == 357.0
+
+
+def test_totals_survive_validation():
+    """The property that matters: validation must not change the total."""
+    frame = pd.DataFrame([
+        {"From Station Code": "A", "To Station Code": "B",
+         "Commodity": "X", "Annual Tonnage": 10.0,
+         "No. of Rakes / Wagon Units": 1},
+    ] * 4 + [
+        {"From Station Code": "C", "To Station Code": "D",
+         "Commodity": "Y", "Annual Tonnage": 2.5,
+         "No. of Rakes / Wagon Units": 2},
+    ])
+    clean, _ = InputValidator().validate_od_data(frame)
+
+    assert clean[schema.TONNAGE].sum() == pytest.approx(42.5)
+    assert clean[schema.UNITS].sum() == 6
