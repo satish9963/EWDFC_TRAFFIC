@@ -46,6 +46,7 @@ class QAAudit:
                          f"Input {original:,.2f} vs output {final:,.2f}")
 
         missing_route = 0
+        portal_errors = 0
         unknown_eligibility = 0
         no_overlap = 0
 
@@ -53,7 +54,18 @@ class QAAudit:
             distance = row.get(schema.IR_DISTANCE)
             if pd.isna(distance) or distance == 0:
                 missing_route += 1
-                self.log(index, "Missing route / portal failure",
+                # A portal failure and a genuine no-route are different facts
+                # needing different follow-up: one is "retry", the other is
+                # "check the station codes".
+                state = row.get(schema.ROUTE_SOURCE, "UNKNOWN")
+                if state == "ERROR":
+                    portal_errors += 1
+                    issue = "RBS portal failure (retry)"
+                elif state == "NO_ROUTE":
+                    issue = "No route returned by RBS"
+                else:
+                    issue = "Missing route"
+                self.log(index, issue,
                          f"{row.get(schema.FROM_CODE)} -> {row.get(schema.TO_CODE)}")
 
             if row.get(schema.ELIGIBLE) == UNKNOWN:
@@ -67,6 +79,13 @@ class QAAudit:
         if missing_route:
             self.log(-1, "Summary: routes unresolved",
                      f"{missing_route} of {len(final_df)} rows have no route from the portal.")
+        if portal_errors:
+            # Worth separating loudly: these rows are recoverable by re-running
+            # once the portal is reachable, whereas a genuine no-route is not.
+            self.log(-1, "Summary: portal unreachable",
+                     f"{portal_errors} row(s) failed on the connection rather than on the "
+                     f"data. Re-run once the portal is reachable; purge the ERROR rows "
+                     f"first with RBSCache().purge_status('ERROR').")
         if unknown_eligibility:
             self.log(-1, "Summary: eligibility unknown",
                      f"{unknown_eligibility} of {len(final_df)} rows could not be judged.")

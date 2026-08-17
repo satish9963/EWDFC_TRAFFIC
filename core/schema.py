@@ -55,6 +55,10 @@ THRESHOLD_APPLIED = "Threshold Applied"
 ELIGIBLE = "Eligible"
 ROUTE_COMBINATION = "Route Combination"
 ROUTE_FETCHED_AT = "Route Fetched At"
+# CACHE | FETCHED | NO_ROUTE | ERROR -- where this row's route came from.
+# Without it a blank IR Distance is ambiguous between "the portal has no route
+# for this pair" and "the portal could not be reached".
+ROUTE_SOURCE = "Route Source"
 
 # --- Station summary output ----------------------------------------------
 ENTERING_TONNAGE = "entering_tonnage"
@@ -133,6 +137,24 @@ _ALIASES = {
 def normalise(name):
     """Reduce a header to a comparable key: lowercase alphanumerics only."""
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def normalise_station_code(code):
+    """Canonical station code.
+
+    Excel is the reason this exists. A code column containing any blank cell is
+    read by pandas as float64, so the code 1234 arrives as "1234.0" and never
+    matches anything in the cache -- the lookup misses, IR Distance comes out
+    empty, and nothing anywhere reports an error.
+
+    Every place that produces or consumes a station code must use this, or the
+    two sides disagree silently. That is the same failure mode as the column
+    names above, which is why it lives here rather than in one agent.
+    """
+    text = str(code).strip().upper()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    return text
 
 
 # Reverse index built once: normalised alias -> canonical column name.

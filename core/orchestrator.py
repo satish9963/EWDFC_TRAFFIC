@@ -64,7 +64,13 @@ class WorkflowOrchestrator:
 
         report(15, "Resolving routes (agent 2)...")
         scraper = RBSScraper(max_age_days=self.project.cache_max_age_days)
-        od_pairs = list(zip(clean_od[schema.FROM_CODE], clean_od[schema.TO_CODE]))
+        # Normalised on both sides -- here and at the lookup below. If the two
+        # disagree the lookup misses, IR Distance renders blank, and nothing
+        # reports an error.
+        od_pairs = [
+            (schema.normalise_station_code(source), schema.normalise_station_code(dest))
+            for source, dest in zip(clean_od[schema.FROM_CODE], clean_od[schema.TO_CODE])
+        ]
 
         def route_progress(done, total):
             report(15 + int(35 * done / max(total, 1)), f"Routes resolved {done}/{total}...")
@@ -85,8 +91,9 @@ class WorkflowOrchestrator:
         rows = []
         total_rows = len(clean_od)
         for position, (_, row) in enumerate(clean_od.iterrows()):
-            source = row[schema.FROM_CODE]
-            destination = row[schema.TO_CODE]
+            # Same normalisation the scraper used to build its keys.
+            source = schema.normalise_station_code(row[schema.FROM_CODE])
+            destination = schema.normalise_station_code(row[schema.TO_CODE])
             distance, sequence, _junctions, fetched_at = routes.get(
                 (source, destination), (None, [], [], None)
             )
@@ -98,6 +105,8 @@ class WorkflowOrchestrator:
             record[schema.IR_DISTANCE] = distance
             record[schema.ROUTE] = " -> ".join(sequence) if sequence else ""
             record[schema.ROUTE_FETCHED_AT] = fetched_at
+            record[schema.ROUTE_SOURCE] = scraper.pair_status.get(
+                (source, destination), "UNKNOWN")
             record[schema.CORRIDOR_OVERLAP] = "YES" if mapping["overlap"] else "NO"
             record[schema.ROUTE_ORIGIN] = mapping["route_origin"]
             record[schema.ROUTE_DESTINATION] = mapping["route_destination"]
@@ -134,6 +143,14 @@ class WorkflowOrchestrator:
 
         report(100, "Complete")
 
+        # Surface where the routes actually came from. Without this a run looks
+        # identical whether RBS answered, was unreachable, or was never
+        # contacted because every pair was already cached.
+        route_stats = dict(scraper.stats)
+        route_stats["unique_pairs"] = len(set(od_pairs))
+        route_stats["last_error"] = scraper.last_error
+        route_stats["circuit_open"] = scraper.circuit_open
+
         results = {
             "master_od": master_df,
             "station_summary": station_summary,
@@ -141,7 +158,7 @@ class WorkflowOrchestrator:
             "exception_log": exception_log,
             "project": self.project,
             "criterion": engine.criterion_text(),
-            "route_stats": scraper.stats,
+            "route_stats": route_stats,
             "validation": {"od": od_report.as_dict(), "corridor": corridor_report.as_dict()},
             "geometry": self.geometry,
             "spatial_matches": sorted(mapper.spatial_matches),

@@ -181,6 +181,42 @@ def _corridor_profile(station_summary):
     return True
 
 
+def _route_provenance(stats):
+    """Where the routes came from.
+
+    With tens of thousands of pairs already cached, a healthy run can make zero
+    network calls -- which reads as "it isn't fetching". Stating the split stops
+    that being mistaken for a fault, and makes a real outage unmistakable.
+    """
+    if not stats:
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Unique OD pairs", format_number(stats.get("unique_pairs", 0)))
+    c2.metric("From cache", format_number(stats.get("cache_hits", 0)))
+    c3.metric("Fetched from RBS", format_number(stats.get("fetched", 0)))
+    c4.metric("Portal errors", format_number(stats.get("errors", 0)))
+
+    if stats.get("errors"):
+        message = f"The RBS portal was unreachable for {stats['errors']:,} pair(s)."
+        if stats.get("circuit_open"):
+            message += (" Fetching stopped early after repeated connection failures, "
+                        "so some pairs were never attempted.")
+        if "ConnectionError" in str(stats.get("last_error") or ""):
+            message += (" The TCP connection was refused — that is a network or "
+                        "source-IP problem, not a data problem. Run `python net_check` "
+                        "on this machine to tell which.")
+        st.error(f"{message}\n\nLast error: {stats.get('last_error')}")
+    elif stats.get("no_route"):
+        st.warning(
+            f"The portal returned no route for {stats['no_route']:,} pair(s). "
+            f"These are usually station codes it does not recognise."
+        )
+    elif not stats.get("fetched") and stats.get("cache_hits"):
+        st.info("Every OD pair was served from the cache — no live RBS calls were "
+                "needed this run.")
+
+
 def _run_context(results):
     """What this run actually did, stated rather than assumed."""
     project = results["project"]
@@ -205,11 +241,11 @@ def _run_context(results):
             bits.append("Alignment supplied but too fragmented for chainage; corridor "
                         "length not reported.")
 
-    if stats:
-        bits.append(f"Routes: {stats.get('cache_hits', 0):,} from cache, "
-                    f"{stats.get('fetched', 0):,} fetched, "
-                    f"{stats.get('failed', 0):,} unresolved.")
+    if results.get("chainage_source") is None and results.get("geometry") is None:
+        bits.append("No chainage available, so corridor length is not reported.")
     st.caption(" ".join(bits))
+
+    _route_provenance(stats)
 
     # Proximity matching only sees stations whose position is known. Saying so
     # is the difference between "these routes miss the corridor" and "we could

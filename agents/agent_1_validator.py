@@ -131,8 +131,11 @@ class InputValidator:
         clean = df.dropna(subset=schema.OD_REQUIRED).copy()
         report.dropped_missing_codes = len(df) - len(clean)
 
+        # normalise_station_code, not .str.upper(): a code column with any blank
+        # cell is read as float64, so 1234 becomes "1234.0" and never matches
+        # the route cache. The scraper normalises the same way.
         for column in (schema.FROM_CODE, schema.TO_CODE):
-            clean[column] = clean[column].astype(str).str.strip().str.upper()
+            clean[column] = clean[column].map(schema.normalise_station_code)
 
         # Codes that survived as empty strings or pandas' "NAN" text.
         blank = clean[schema.FROM_CODE].isin(["", "NAN", "NONE"]) | \
@@ -190,8 +193,8 @@ class InputValidator:
             )
 
         clean = df.dropna(subset=[schema.CORRIDOR_CODE]).copy()
-        clean[schema.CORRIDOR_CODE] = (clean[schema.CORRIDOR_CODE]
-                                       .astype(str).str.strip().str.upper())
+        clean[schema.CORRIDOR_CODE] = clean[schema.CORRIDOR_CODE].map(
+            schema.normalise_station_code)
         clean = clean[~clean[schema.CORRIDOR_CODE].isin(["", "NAN", "NONE"])]
 
         for column in (schema.LATITUDE, schema.LONGITUDE, schema.CHAINAGE):

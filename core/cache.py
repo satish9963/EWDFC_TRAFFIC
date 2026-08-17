@@ -19,6 +19,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from config import CACHE_DB
+from core.schema import normalise_station_code
 
 SCHEMA_VERSION = 2
 
@@ -254,3 +255,38 @@ class RBSCache:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', rows)
                 conn.commit()
+
+    def status_counts(self):
+        """{'SUCCESS': n, 'FAILED': n, 'ERROR': n} -- lets the UI report what the
+        cache actually holds instead of guessing."""
+        with self._lock:
+            with self._connect() as conn:
+                return dict(conn.execute(
+                    "SELECT status, COUNT(*) FROM rbs_routes GROUP BY status"
+                ).fetchall())
+
+    def purge_status(self, status="ERROR"):
+        """Drop rows written by a failed run so the next run retries them cleanly.
+
+        ERROR rows are re-attempted anyway (a lookup only short-circuits on
+        SUCCESS), but leaving them in makes status_counts() misleading.
+        """
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.execute("DELETE FROM rbs_routes WHERE status = ?", (status,))
+                conn.commit()
+                return cursor.rowcount
+
+    def invalidate(self, pairs):
+        """Force specific (source, destination) pairs to be refetched live.
+
+        Use this to prove the scraper is really reaching RBS: invalidate a few
+        pairs, re-run, and check that stats['fetched'] > 0.
+        """
+        with self._lock:
+            with self._connect() as conn:
+                cursor = conn.executemany(
+                    "DELETE FROM rbs_routes WHERE source = ? AND destination = ?",
+                    [(normalise_station_code(s), normalise_station_code(d)) for s, d in pairs])
+                conn.commit()
+                return cursor.rowcount

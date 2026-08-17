@@ -21,6 +21,10 @@
 !tools/
 !.streamlit/
 
+# Connectivity/triage scripts. Deliberately extensionless, as shipped.
+!diagnose_run
+!net_check
+
 # ...but never the compiled artefacts inside those packages
 __pycache__/
 *.pyc
